@@ -418,3 +418,58 @@ pub fn neoforge_mc_prefix(mc_version: &str) -> Option<String> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
+    #[tokio::test]
+    async fn fetch_text_falls_back_between_candidates() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/primary"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/fallback"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&server)
+            .await;
+
+        let http = test_client();
+        let primary = format!("{}/primary", server.uri());
+        let fallback = format!("{}/fallback", server.uri());
+        let text = fetch_text(&http, &[primary.as_str(), fallback.as_str()], "test")
+            .await
+            .unwrap();
+        assert_eq!(text, "ok");
+    }
+
+    #[tokio::test]
+    async fn fetch_text_returns_last_error_when_all_candidates_fail() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/a"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/b"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let http = test_client();
+        let a = format!("{}/a", server.uri());
+        let b = format!("{}/b", server.uri());
+        let err = fetch_text(&http, &[a.as_str(), b.as_str()], "test").await.unwrap_err();
+        assert!(matches!(err, MdtError::NetworkError(_)), "got {err:?}");
+    }
+}

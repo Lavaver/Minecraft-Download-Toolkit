@@ -7,6 +7,7 @@
 use crate::error::MdtError;
 use crate::mirror::Mirror;
 use crate::modloader::ModLoader;
+use crate::registry;
 use crate::urls::ManifestUrls;
 
 use super::version_json::{download_library, read_vanilla_launch_args, GeneratedLibrary, GeneratedVersionJson};
@@ -21,17 +22,25 @@ pub async fn install(
 ) -> Result<InstalledVersion, MdtError> {
     let urls = ManifestUrls::try_new(&req.mirror)?;
     let id = loader_version_id(&req.mc_version, ModLoader::Liteloader, &req.loader_version);
+    let reg_dir = registry::modloader_dir(req.loader.display_name(), &req.loader_version);
 
-    // 1. Download the LiteLoader core JAR (non-standard repository, dedicated download endpoint).
+    // 1. Download the LiteLoader core JAR into the global cache, then copy into `libraries/`.
     let liteloader_name = format!("com.mumfrey:liteloader:{}", req.loader_version);
     let liteloader_path = library_path_from_name(&liteloader_name)?;
     let liteloader_dest = libraries_dir(&req.root_dir).join(&liteloader_path);
+    let cached = reg_dir.join(&liteloader_path);
     let file = format!("{}/liteloader-{}.jar", req.mc_version, req.loader_version);
     let mirrored = urls.apply_mirror(&format!("{}/{}", urls.liteloader_base, file), &req.mirror);
     // Mirror first, official as fallback.
     let official = format!("{}/{}", ManifestUrls::try_new(&Mirror::Mojang)?.liteloader_base, file);
     let candidates = dedup_urls(&[mirrored.clone(), official]);
-    download_to_file_from_candidates(http, &candidates, &liteloader_dest).await?;
+    if !cached.exists() {
+        download_to_file_from_candidates(http, &candidates, &cached).await?;
+    }
+    if let Some(parent) = liteloader_dest.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::copy(&cached, &liteloader_dest).await?;
     eprintln!("Downloaded liteloader-{}.jar by LiteLoader {}", req.loader_version, req.loader_version);
 
     // 2. Download LaunchWrapper and ASM (required at runtime).
@@ -43,6 +52,7 @@ pub async fn install(
         &req.mirror,
         &urls,
         None,
+        Some(&reg_dir),
     )
     .await?;
     download_library(
@@ -53,6 +63,7 @@ pub async fn install(
         &req.mirror,
         &urls,
         None,
+        Some(&reg_dir),
     )
     .await?;
 

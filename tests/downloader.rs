@@ -67,7 +67,9 @@ fn test_build_tasks_from_version_json() {
     let tasks = build_tasks_from_version_json(&version_json, &root_dir);
 
     let current_os = std::env::consts::OS;
-    let expected_count = 3 + if current_os == "windows" || current_os == "linux" || current_os == "macos" { 1 } else { 0 };
+    // client.jar + the jinput library + (natives for the current OS). The asset index is no longer
+    // part of this list — it is fetched separately via the global index cache.
+    let expected_count = 2 + if current_os == "windows" || current_os == "linux" || current_os == "macos" { 1 } else { 0 };
 
     assert_eq!(tasks.len(), expected_count, "任务数量不对");
 

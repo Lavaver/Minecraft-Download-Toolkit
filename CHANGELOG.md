@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.0] | Registry & Security Update
+
+- **Resilient downloads** — a single asset timing out or dropping the connection no longer aborts
+  the batch. Each file is retried up to 3 times with exponential backoff + jitter, then soft-failed
+  and reported via `MdtError::PartialDownloadFailed`, so the rest of the queue still finishes.
+- **Cargo-registry flavor asset system** — a *global* registry rooted at `$HOME/.mdt/registry` (override
+  `MDT_HOME`), shared across `.minecraft` directories, following the standard layout:
+  `src/mojang/<version>/main/` for vanilla assets (content-addressed by SHA-1),
+  `index/mojang/.cache/<sha1>` for the `assetIndex` JSON, and `<Modloader>/<version>/` for loader
+  libraries and Method A installer JARs. The index is loaded first; every file is downloaded into
+  the registry (temp + checksum verified + moved) and then *copied* — never hardlinked — into the
+  local `assets/objects/` or `libraries/` dir. Modloader artifacts (libraries and installer JARs)
+  are checksum-verified via their Maven `.sha1` sidecar (falling back to `.sha256` then `.md5`),
+  and the hash is persisted next to the cached file so warm cache hits stay verifiable offline.
+
 ## [0.5.3] | Feature Update: We made a minor tweak to the terminal experience
 
 - **Cargo-style progress** — installs and downloads now print friendly status lines to stderr:

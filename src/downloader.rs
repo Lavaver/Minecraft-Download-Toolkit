@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
 use futures::FutureExt;
@@ -77,12 +78,12 @@ pub struct VersionJson {
     pub libraries: Vec<Library>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct AssetIndex {
     pub objects: HashMap<String, AssetObject>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AssetObject {
     pub hash: String,
     pub size: u64,
@@ -179,12 +180,14 @@ pub async fn execute_downloads(
 
     let concurrency = concurrency.max(1);
     let progress = Arc::new(Progress::new(tasks.len()));
+    let failed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     let results = stream::iter(tasks.into_iter().map(|task| {
         let progress = Arc::clone(&progress);
+        let failed = Arc::clone(&failed);
         let label = task.label.clone();
         let by = task.by.clone();
-        download_single_file(task, mirror, urls, http).map(move |res| {
+        download_single_file(task, mirror, urls, http, failed).map(move |res| {
             let downloaded = matches!(&res, Ok(true));
             progress.complete(downloaded, label.as_deref(), by.as_deref());
             res
@@ -196,10 +199,18 @@ pub async fn execute_downloads(
 
     progress.finish();
 
+    // Fatal errors (local I/O, native extraction) fail the whole batch; file-level network
+    // failures were already soft-handled and recorded in `failed`.
     for res in results {
         res?;
     }
-    Ok(())
+
+    let failed = failed.lock().unwrap();
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(MdtError::PartialDownloadFailed(failed.clone()))
+    }
 }
 
 /// A bottom-pinned, throttled progress line for [`execute_downloads`].
@@ -381,15 +392,35 @@ fn fallback_urls(task: &DownloadTask, mirror: &Mirror, urls: &ManifestUrls) -> V
     candidates
 }
 
-/// Stream `url` into `task.dest_path` and verify its SHA-1 against the manifest.
+/// Stream `url` into a temporary sibling of `task.dest_path`, verify its SHA-1, then move it into
+/// place — so the final cache never holds a partial or unverified file.
 async fn download_from_url(
     task: &DownloadTask,
     url: &str,
     http: &reqwest::Client,
 ) -> Result<(), MdtError> {
     let resp = http.get(url).send().await?.error_for_status()?;
+    let tmp = temp_path(&task.dest_path);
 
-    let mut file = tokio::fs::File::create(&task.dest_path).await?;
+    let result = download_body_to_temp(resp, &tmp, task).await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    result
+}
+
+/// The temporary sibling path used while a file is being downloaded and verified.
+fn temp_path(dest: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.mdt-download", dest.display()))
+}
+
+/// Stream a response body to `tmp`, verify its SHA-1, and rename it onto the final destination.
+async fn download_body_to_temp(
+    resp: reqwest::Response,
+    tmp: &Path,
+    task: &DownloadTask,
+) -> Result<(), MdtError> {
+    let mut file = tokio::fs::File::create(tmp).await?;
     let mut stream = resp.bytes_stream();
     let mut hasher = Sha1::new();
 
@@ -402,23 +433,68 @@ async fn download_from_url(
 
     let actual = hex::encode(hasher.finalize());
     if actual != task.sha1 {
-        let _ = tokio::fs::remove_file(&task.dest_path).await;
         return Err(MdtError::ChecksumMismatch {
             path: task.dest_path.display().to_string(),
             expected: task.sha1.clone(),
             actual,
         });
     }
+    tokio::fs::rename(tmp, &task.dest_path).await?;
     Ok(())
+}
+
+/// How many times to retry a failed download (after the initial attempt) before soft-failing it.
+const MAX_DOWNLOAD_RETRIES: u32 = 3;
+
+/// A small (0..250ms) jitter derived from the clock, used to spread out retry storms without a
+/// `rand` dependency.
+fn jitter_millis() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    u64::from(nanos % 250)
+}
+
+/// Download a file with exponential backoff, deleting any partial file between attempts.
+async fn download_with_retries(
+    task: &DownloadTask,
+    mirror: &Mirror,
+    urls: &ManifestUrls,
+    http: &reqwest::Client,
+) -> Result<(), MdtError> {
+    let mut last_err = None;
+    for attempt in 0..=MAX_DOWNLOAD_RETRIES {
+        if attempt > 0 {
+            let base = Duration::from_secs(1u64 << (attempt - 1)); // 1s, 2s, 4s
+            let jitter = Duration::from_millis(jitter_millis());
+            tokio::time::sleep(base + jitter).await;
+        }
+        match download_file_stream(task, mirror, urls, http).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&task.dest_path).await;
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        MdtError::InvalidManifest(format!("download failed with no error for {}", task.url))
+    }))
 }
 
 /// Download a single file, skipping if it already exists with a matching SHA-1, then extract
 /// natives when requested. Returns `true` when a fresh copy was actually downloaded.
+///
+/// File-level network failures are retried with backoff and then *soft-failed* (the URL is pushed
+/// onto `failed` and `Ok(false)` is returned) so one bad asset never kills the whole batch.
 async fn download_single_file(
     task: DownloadTask,
     mirror: &Mirror,
     urls: &ManifestUrls,
     http: &reqwest::Client,
+    failed: Arc<Mutex<Vec<String>>>,
 ) -> Result<bool, MdtError> {
     // 1. Pre-check: skip if the file already exists and its SHA-1 matches.
     let mut need_download = true;
@@ -435,12 +511,19 @@ async fn download_single_file(
         }
     }
 
-    // 2. Download if necessary.
+    // 2. Download if necessary, retrying transient failures with exponential backoff.
     if need_download {
         if let Some(parent) = task.dest_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        download_file_stream(&task, mirror, urls, http).await?;
+        if let Err(e) = download_with_retries(&task, mirror, urls, http).await {
+            eprintln!(
+                "[mdt] WARN: Failed to download {} after {MAX_DOWNLOAD_RETRIES} retries ({e}). Skipping...",
+                task.url
+            );
+            failed.lock().unwrap().push(task.url.clone());
+            return Ok(false);
+        }
     }
 
     // 3. Extract natives if requested.
@@ -560,39 +643,21 @@ pub fn build_tasks_from_version_json(version_json: &VersionJson, root_dir: &Path
         }
     }
 
-    // 3. asset index
-    if let Some(asset_index) = &version_json.asset_index {
-        tasks.push(DownloadTask {
-            url: asset_index.url.clone(),
-            dest_path: root_dir
-                .join("assets")
-                .join("indexes")
-                .join(format!("{}.json", asset_index.id)),
-            sha1: asset_index.sha1.clone(),
-            size: asset_index.size,
-            extract_to: None,
-            label: Some(format!("{}.json", asset_index.id)),
-            by: Some(by.clone()),
-        });
-    }
+    // The asset index is NOT downloaded here: `AssetRegistry::fetch_and_sync` fetches it through
+    // the global `index/` cache (so it is cached and verified separately from the file downloads).
 
     tasks
 }
 
-/// Build download tasks for every asset object in an asset index.
-pub fn build_tasks_from_asset_index(asset_index: &AssetIndex, root_dir: &Path) -> Vec<DownloadTask> {
-    asset_index
-        .objects
-        .values()
+/// Build download tasks for a set of asset objects into `objects_dir`.
+pub fn build_tasks_from_assets(objects: &[AssetObject], objects_dir: &Path) -> Vec<DownloadTask> {
+    objects
+        .iter()
         .map(|object| {
-            let prefix = &object.hash[0..2];
+            let prefix = &object.hash[..2];
             DownloadTask {
-                url: format!("https://resources.download.minecraft.net/{}/{}", prefix, object.hash),
-                dest_path: root_dir
-                    .join("assets")
-                    .join("objects")
-                    .join(prefix)
-                    .join(&object.hash),
+                url: format!("https://resources.download.minecraft.net/{prefix}/{}", object.hash),
+                dest_path: objects_dir.join(prefix).join(&object.hash),
                 sha1: object.hash.clone(),
                 size: object.size,
                 extract_to: None,
@@ -602,6 +667,12 @@ pub fn build_tasks_from_asset_index(asset_index: &AssetIndex, root_dir: &Path) -
             }
         })
         .collect()
+}
+
+/// Build download tasks for every asset object in an asset index.
+pub fn build_tasks_from_asset_index(asset_index: &AssetIndex, root_dir: &Path) -> Vec<DownloadTask> {
+    let objects: Vec<AssetObject> = asset_index.objects.values().cloned().collect();
+    build_tasks_from_assets(&objects, &root_dir.join("assets").join("objects"))
 }
 
 // ===== tests =====

@@ -86,6 +86,10 @@ pub enum MdtError {
     /// Uninstalling a mod loader failed (e.g. post-restore verification).
     #[error("uninstall failed: {0}")]
     UninstallFailed(String),
+
+    /// Some downloads failed after exhausting retries; the remaining queue still completed.
+    #[error("partial download failure: {0:?}")]
+    PartialDownloadFailed(Vec<String>),
 }
 
 impl MdtError {
@@ -108,5 +112,40 @@ impl MdtError {
             context: context.into(),
             source: Box::new(self),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_wraps_with_human_readable_message() {
+        let wrapped = MdtError::JavaNotFound.context("installing Forge 1.20.1");
+        assert_eq!(
+            wrapped.to_string(),
+            "installing Forge 1.20.1: Java runtime not found: install Java 8+ or 17+ and retry"
+        );
+    }
+
+    #[test]
+    fn checksum_mismatch_displays_path_and_hashes() {
+        let err = MdtError::ChecksumMismatch {
+            path: "libraries/x.jar".to_string(),
+            expected: "abc".to_string(),
+            actual: "def".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "checksum mismatch for libraries/x.jar: expected abc, got def"
+        );
+    }
+
+    #[test]
+    fn partial_download_failed_lists_urls() {
+        let err = MdtError::PartialDownloadFailed(vec!["https://a".to_string(), "https://b".to_string()]);
+        let s = err.to_string();
+        assert!(s.contains("partial download failure"), "{s}");
+        assert!(s.contains("https://a") && s.contains("https://b"), "{s}");
     }
 }

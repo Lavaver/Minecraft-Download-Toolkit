@@ -2,7 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::downloader::{self, AssetIndex, VersionJson};
+use crate::asset::AssetRegistry;
+use crate::downloader::{self, VersionJson};
 use crate::error::MdtError;
 use crate::http;
 use crate::installer::{self, InstallRequest, InstalledVersion};
@@ -111,17 +112,18 @@ impl MdtClient {
         let tasks = downloader::build_tasks_from_version_json(&version_json, &self.root);
         downloader::execute_downloads(&self.http, tasks, self.concurrency, &self.mirror, &urls).await?;
 
-        // Assets.
+        // Assets: fetch the index (via the global index cache), then sync the global registry
+        // cache into `assets/objects`.
         if let Some(asset_index) = &version_json.asset_index {
-            let asset_index_path = self
-                .root
-                .join("assets")
-                .join("indexes")
-                .join(format!("{}.json", asset_index.id));
-            let content = tokio::fs::read_to_string(&asset_index_path).await?;
-            let index: AssetIndex = serde_json::from_str(&content)?;
-            let asset_tasks = downloader::build_tasks_from_asset_index(&index, &self.root);
-            downloader::execute_downloads(&self.http, asset_tasks, self.concurrency, &self.mirror, &urls).await?;
+            AssetRegistry::fetch_and_sync(
+                &self.root,
+                asset_index,
+                &version_json.id,
+                &self.http,
+                &self.mirror,
+                &urls,
+            )
+            .await?;
         }
 
         Ok(version_json)

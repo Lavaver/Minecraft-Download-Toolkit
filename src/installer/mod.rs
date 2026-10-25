@@ -23,9 +23,14 @@ mod quilt;
 mod uninstall;
 mod version_json;
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use futures::StreamExt;
+use md5::Md5;
+use sha1::{Digest, Sha1};
+use sha2::Sha256;
 
 use crate::error::MdtError;
 use crate::mirror::Mirror;
@@ -266,6 +271,196 @@ pub async fn download_to_file_from_candidates(
     }))
 }
 
+/// Copy `src` to `dst`, creating parent directories (never hardlink).
+pub async fn copy_file(src: &Path, dst: &Path) -> Result<(), MdtError> {
+    if let Some(parent) = dst.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::copy(src, dst).await?;
+    Ok(())
+}
+
+/// Download a Maven artifact with checksum verification and global-registry caching.
+///
+/// When `cache_dir` is set, the artifact is cached under `cache_dir/rel_path` with a persisted
+/// `.checksum` sidecar; warm hits are verified offline and copied into `dest`. Otherwise the file
+/// is downloaded straight into `dest` (still verified when a Maven checksum sidecar is reachable).
+pub async fn download_artifact_verified(
+    http: &reqwest::Client,
+    upstream_url: &str,
+    dest: &Path,
+    mirror: &Mirror,
+    urls: &ManifestUrls,
+    cache_dir: Option<&Path>,
+    rel_path: &str,
+) -> Result<(), MdtError> {
+    match cache_dir {
+        Some(cache_dir) => {
+            let cached = cache_dir.join(rel_path);
+            let cached_checksum = PathBuf::from(format!("{}.checksum", cached.display()));
+
+            // Reuse a verified cache entry (offline: hash is read from the local sidecar).
+            if file_matches(&cached, read_checksum_sidecar(&cached_checksum).as_deref()) {
+                return copy_file(&cached, dest).await;
+            }
+
+            let _ = tokio::fs::remove_file(&cached).await;
+            let _ = tokio::fs::remove_file(&cached_checksum).await;
+
+            // Download, verifying against the authoritative Maven checksum when reachable.
+            let authoritative = fetch_checksum(http, upstream_url, mirror, urls).await;
+            match &authoritative {
+                Some(expected) => {
+                    download_verified(http, upstream_url, &cached, expected, mirror, urls).await?;
+                }
+                None => {
+                    download_maven_fallback(http, upstream_url, &cached, mirror, urls).await?;
+                }
+            }
+
+            // Persist the hash (authoritative, or a computed SHA-1) for offline verification.
+            let hash = authoritative.or_else(|| compute_file_hash::<Sha1>(&cached));
+            if let Some(h) = hash {
+                tokio::fs::write(&cached_checksum, format!("{h}\n")).await?;
+            }
+            copy_file(&cached, dest).await
+        }
+        None => match fetch_checksum(http, upstream_url, mirror, urls).await {
+            Some(expected) => download_verified(http, upstream_url, dest, &expected, mirror, urls).await,
+            None => download_maven_fallback(http, upstream_url, dest, mirror, urls).await,
+        },
+    }
+}
+
+/// Fetch a Maven checksum sidecar (`.sha1`, then `.sha256`, then `.md5`), mirror-first.
+async fn fetch_checksum(
+    http: &reqwest::Client,
+    artifact_url: &str,
+    mirror: &Mirror,
+    urls: &ManifestUrls,
+) -> Option<String> {
+    for suffix in ["sha1", "sha256", "md5"] {
+        let sidecar = format!("{artifact_url}.{suffix}");
+        let mirrored = urls.apply_maven_mirror(&sidecar, mirror);
+        for url in dedup_urls(&[mirrored, sidecar]) {
+            let resp = match http.get(&url).timeout(Duration::from_secs(15)).send().await {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            if let Ok(resp) = resp.error_for_status() {
+                if let Ok(text) = resp.text().await {
+                    let hash = text.trim().to_string();
+                    if ChecksumAlgo::from_hash(&hash).is_some() {
+                        return Some(hash);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Download `url` to `dest` and verify its checksum against `expected` before moving it into place.
+async fn download_verified(
+    http: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+    expected: &str,
+    mirror: &Mirror,
+    urls: &ManifestUrls,
+) -> Result<(), MdtError> {
+    let tmp = PathBuf::from(format!("{}.mdt-download", dest.display()));
+    let result = async {
+        download_maven_fallback(http, url, &tmp, mirror, urls).await?;
+        let actual = compute_hash_for(&tmp, ChecksumAlgo::from_hash(expected));
+        if actual.as_deref() != Some(expected) {
+            return Err(MdtError::ChecksumMismatch {
+                path: dest.display().to_string(),
+                expected: expected.to_string(),
+                actual: actual.unwrap_or_else(|| "<unreadable>".to_string()),
+            });
+        }
+        tokio::fs::rename(&tmp, dest).await?;
+        Ok::<_, MdtError>(())
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    result
+}
+
+/// A checksum algorithm, inferred from a hex digest's length.
+#[derive(Clone, Copy)]
+enum ChecksumAlgo {
+    Sha1,
+    Sha256,
+    Md5,
+}
+
+impl ChecksumAlgo {
+    fn from_hash(hash: &str) -> Option<Self> {
+        if !is_hex(hash) {
+            return None;
+        }
+        match hash.len() {
+            40 => Some(ChecksumAlgo::Sha1),
+            64 => Some(ChecksumAlgo::Sha256),
+            32 => Some(ChecksumAlgo::Md5),
+            _ => None,
+        }
+    }
+}
+
+/// Compute `path`'s checksum with the given algorithm, or `None` on any I/O error.
+fn compute_hash_for(path: &Path, algo: Option<ChecksumAlgo>) -> Option<String> {
+    match algo {
+        Some(ChecksumAlgo::Sha1) => compute_file_hash::<Sha1>(path),
+        Some(ChecksumAlgo::Sha256) => compute_file_hash::<Sha256>(path),
+        Some(ChecksumAlgo::Md5) => compute_file_hash::<Md5>(path),
+        None => None,
+    }
+}
+
+/// True if `path`'s checksum equals `expected` (when `expected` is a valid digest).
+fn file_matches(path: &Path, expected: Option<&str>) -> bool {
+    let Some(hash) = expected else {
+        return false;
+    };
+    compute_hash_for(path, ChecksumAlgo::from_hash(hash)).is_some_and(|actual| actual == hash)
+}
+
+/// Read a `.checksum` sidecar into a normalized hash, or `None` if absent/invalid.
+fn read_checksum_sidecar(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let hash = text.trim();
+    if ChecksumAlgo::from_hash(hash).is_some() {
+        Some(hash.to_string())
+    } else {
+        None
+    }
+}
+
+/// A hex digest string (32/40/64 hex characters).
+fn is_hex(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Compute a file's digest with the given algorithm, or `None` on any I/O error.
+fn compute_file_hash<D: Digest>(path: &Path) -> Option<String> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = D::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = file.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Some(hex::encode(hasher.finalize()))
+}
+
 /// Extract a JAR (ZIP) to a directory, skipping directories and `META-INF/`, with zip-slip
 /// protection.
 pub async fn unzip_jar(src: &Path, dest: &Path) -> Result<(), MdtError> {
@@ -412,4 +607,101 @@ pub(crate) async fn read_vanilla_version_id(dir: &Path) -> Result<String, MdtErr
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .ok_or_else(|| MdtError::InvalidManifest(format!("version JSON at {} has no `id` field", path.display())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use md5::Md5;
+    use sha1::{Digest, Sha1};
+    use sha2::Sha256;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("mdt-installer-mod-{tag}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn dedup_urls_removes_duplicates_and_empties() {
+        let urls = vec!["a".to_string(), "".to_string(), "b".to_string(), "a".to_string()];
+        assert_eq!(dedup_urls(&urls), vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn checksum_algo_infers_algorithm_from_length() {
+        assert!(matches!(ChecksumAlgo::from_hash(&"a".repeat(40)), Some(ChecksumAlgo::Sha1)));
+        assert!(matches!(ChecksumAlgo::from_hash(&"b".repeat(64)), Some(ChecksumAlgo::Sha256)));
+        assert!(matches!(ChecksumAlgo::from_hash(&"c".repeat(32)), Some(ChecksumAlgo::Md5)));
+        assert!(ChecksumAlgo::from_hash(&"z".repeat(40)).is_none());
+        assert!(ChecksumAlgo::from_hash("").is_none());
+    }
+
+    #[test]
+    fn is_hex_only_accepts_hex_digits() {
+        assert!(is_hex("0123456789abcdef"));
+        assert!(!is_hex("xyz"));
+        assert!(!is_hex(""));
+    }
+
+    #[test]
+    fn file_matches_verifies_sha1_sha256_and_md5() {
+        let dir = temp_dir("matches");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f.bin");
+        std::fs::write(&path, b"hello").unwrap();
+
+        let sha1 = hex::encode(Sha1::digest(b"hello"));
+        let sha256 = hex::encode(Sha256::digest(b"hello"));
+        let md5 = hex::encode(Md5::digest(b"hello"));
+
+        assert!(file_matches(&path, Some(&sha1)));
+        assert!(file_matches(&path, Some(&sha256)));
+        assert!(file_matches(&path, Some(&md5)));
+        assert!(!file_matches(&path, Some(&"0".repeat(40))));
+        assert!(!file_matches(&path, None));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_checksum_sidecar_normalizes_and_validates() {
+        let dir = temp_dir("sidecar");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("c.checksum");
+        let hash = hex::encode(Sha1::digest(b"x"));
+
+        std::fs::write(&path, format!("{hash}\n")).unwrap();
+        assert_eq!(read_checksum_sidecar(&path), Some(hash));
+
+        std::fs::write(&path, "not-a-hash").unwrap();
+        assert_eq!(read_checksum_sidecar(&path), None);
+
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(read_checksum_sidecar(&path), None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn read_vanilla_version_id_reads_id_field() {
+        let dir = temp_dir("vvid");
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = dir.file_name().unwrap().to_str().unwrap().to_string();
+        std::fs::write(dir.join(format!("{name}.json")), r#"{"id": "1.20.1"}"#).unwrap();
+
+        let id = read_vanilla_version_id(&dir).await.unwrap();
+        assert_eq!(id, "1.20.1");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn read_vanilla_version_id_fails_fast_on_missing_json() {
+        let dir = temp_dir("vvid-missing");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let err = read_vanilla_version_id(&dir).await.unwrap_err();
+        assert!(matches!(err, MdtError::InvalidManifest(_)), "got {err:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

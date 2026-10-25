@@ -59,3 +59,22 @@ impl Mirror {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Mirror;
+
+    #[test]
+    fn label_is_human_friendly() {
+        assert_eq!(Mirror::Mojang.label(), "Mojang");
+        assert_eq!(Mirror::BMCLAPI.label(), "BMCLAPI");
+        assert_eq!(Mirror::Custom("my_mirror".into()).label(), "my_mirror");
+    }
+
+    #[test]
+    fn other_falls_back_to_builtin() {
+        assert_eq!(Mirror::Mojang.other(), Mirror::BMCLAPI);
+        assert_eq!(Mirror::BMCLAPI.other(), Mirror::Mojang);
+        assert_eq!(Mirror::Custom("x".into()).other(), Mirror::BMCLAPI);
+    }
+}

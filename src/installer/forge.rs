@@ -6,6 +6,7 @@
 use crate::error::MdtError;
 use crate::mc_version::McVersion;
 use crate::modloader::ModLoader;
+use crate::registry;
 use crate::urls::ManifestUrls;
 
 use super::installer::install_via_official_installer;
@@ -60,8 +61,21 @@ async fn install_modern(
         "{}/net/minecraftforge/forge/{}/forge-{}-installer.jar",
         urls.forge_maven, maven_version, maven_version
     );
+    let rel_path = format!(
+        "net/minecraftforge/forge/{maven_version}/forge-{maven_version}-installer.jar"
+    );
+    let reg_dir = registry::modloader_dir(req.loader.display_name(), &forge_version);
 
-    install_via_official_installer(http, &installer_url, &req.root_dir, &req.mirror, urls).await?;
+    install_via_official_installer(
+        http,
+        &installer_url,
+        &req.root_dir,
+        &req.mirror,
+        urls,
+        Some(&reg_dir),
+        &rel_path,
+    )
+    .await?;
 
     // Verify: the official installer should produce a version JSON. Modern installers reuse the
     // vanilla client JAR via `inheritsFrom`, so only the JSON is required.

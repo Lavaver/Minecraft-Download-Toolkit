@@ -10,21 +10,27 @@ use crate::error::MdtError;
 use crate::mirror::Mirror;
 use crate::urls::ManifestUrls;
 
-use super::{detect_java, download_maven_fallback, ensure_empty_dir};
+use super::{detect_java, download_artifact_verified, ensure_empty_dir};
 
 /// Run the full Method A flow: download installer → detect Java → run natively → clean up.
+///
+/// The installer JAR is checksum-verified and cached under `registry_dir` (keyed by `rel_path`,
+/// its Maven-relative path) so re-installing the same loader never re-downloads it.
 pub async fn install_via_official_installer(
     http: &reqwest::Client,
     installer_url: &str,
     root_dir: &Path,
     mirror: &Mirror,
     urls: &ManifestUrls,
+    registry_dir: Option<&Path>,
+    rel_path: &str,
 ) -> Result<(), MdtError> {
     let temp_dir = root_dir.join(".mdt-installer-tmp");
     ensure_empty_dir(&temp_dir).await?;
 
     let installer_jar = temp_dir.join("installer.jar");
-    download_maven_fallback(http, installer_url, &installer_jar, mirror, urls).await?;
+    download_artifact_verified(http, installer_url, &installer_jar, mirror, urls, registry_dir, rel_path)
+        .await?;
 
     let java = detect_java().await?;
     run_java_installer(&java, &installer_jar, root_dir).await?;

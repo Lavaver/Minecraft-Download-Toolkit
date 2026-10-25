@@ -2,6 +2,7 @@
 
 use crate::error::MdtError;
 use crate::modloader::ModLoader;
+use crate::registry;
 use crate::urls::ManifestUrls;
 
 use super::installer::install_via_official_installer;
@@ -23,8 +24,19 @@ pub async fn install(
         "{}/net/neoforged/neoforge/{}/neoforge-{}-installer.jar",
         urls.neoforge_maven, maven_version, maven_version
     );
+    let rel_path = format!("net/neoforged/neoforge/{maven_version}/neoforge-{maven_version}-installer.jar");
+    let reg_dir = registry::modloader_dir(req.loader.display_name(), &req.loader_version);
 
-    install_via_official_installer(http, &installer_url, &req.root_dir, &req.mirror, &urls).await?;
+    install_via_official_installer(
+        http,
+        &installer_url,
+        &req.root_dir,
+        &req.mirror,
+        &urls,
+        Some(&reg_dir),
+        &rel_path,
+    )
+    .await?;
 
     // Verify: the official installer should produce a version JSON.
     let vdir = version_dir(&req.root_dir, &id);

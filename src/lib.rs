@@ -79,12 +79,14 @@ mod error;
 mod http;
 mod macros;
 
+pub mod asset;
 pub mod downloader;
 pub mod installer;
 pub mod manifest;
 pub mod mc_version;
 pub mod mirror;
 pub mod modloader;
+pub mod registry;
 pub mod urls;
 
 #[cfg(feature = "cli")]
@@ -93,6 +95,7 @@ pub mod cli;
 #[cfg(feature = "tui")]
 pub mod tui;
 
+pub use asset::AssetRegistry;
 pub use client::{MdtClient, MdtClientBuilder};
 pub use downloader::{AssetIndex, AssetObject, DownloadTask, VersionJson};
 pub use error::MdtError;

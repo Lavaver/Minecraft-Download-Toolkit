@@ -3,7 +3,7 @@ members = ["mdt-macros"]
 
 [package]
 name = "mdt-minecraft"
-version = "0.5.3"
+version = "0.6.0"
 edition = "2024"
 description = "Minecraft Download Toolkit - an ergonomic, low-level library for downloading and installing Minecraft versions and mod loaders."
 license = "MIT"
@@ -24,12 +24,14 @@ tui = ["dep:crossterm", "dep:ratatui"]
 
 [dependencies]
 mdt-macros = { version = "0.4.0", path = "mdt-macros" }
-tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread", "fs", "io-util"] }
+tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread", "fs", "io-util", "time"] }
 reqwest = { version = "0.13.5", features = ["json", "stream"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 quick-xml = { version = "0.42.0", features = ["serialize"] }
 sha1 = "0.11.0"
+sha2 = "0.11"
+md-5 = "0.11"
 hex = "0.4.3"
 zip = "9.0.5"
 futures = "0.3.34"

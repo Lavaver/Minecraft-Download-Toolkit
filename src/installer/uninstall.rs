@@ -4,8 +4,8 @@
 //!
 //! 1. Read the on-disk version JSON and identify the base Minecraft version (`id` field).
 //! 2. Fetch the official base manifest (raw text is kept for step 6).
-//! 3. Pre-load every SHA-1 / file name / URL into an in-memory table (no N+1 network queries).
-//! 4. Multi-threaded scan with MCR markers (Modified / Created / Removed).
+//! 3. Preload every SHA-1 / file name / URL into an in-memory table (no N+1 network queries).
+//! 4. Multithreaded scan with MCR markers (Modified / Created / Removed).
 //! 5. Execute: re-download modified files, download missing files, delete removed files.
 //! 6. Rebuild the base Minecraft JSON by overwriting it with the original vanilla JSON.
 //! 7. Re-verify the whole directory against the in-memory table.

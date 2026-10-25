@@ -1,4 +1,4 @@
-//! MCR (Modified, Created, Removed) markers and the multi-threaded SHA-1 scanner.
+//! MCR (Modified, Created, Removed) markers and the multithreaded SHA-1 scanner.
 //!
 //! Uninstalling a mod loader is a SHA-1 manifest comparison. The vanilla manifest tells us every
 //! file that *should* exist and its official hash; the disk tells us what *actually* exists. The

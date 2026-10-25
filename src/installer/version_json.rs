@@ -11,12 +11,13 @@ use serde::Serialize;
 use crate::error::MdtError;
 use crate::mirror::Mirror;
 use crate::modloader::ModLoader;
+use crate::registry;
 use crate::urls::ManifestUrls;
 
 use super::{
-    download_maven_fallback, ensure_empty_dir, libraries_dir, library_path_from_name,
-    loader_version_id, target_version_dir, unzip_jar, version_dir, InstallMethod, InstallRequest,
-    InstalledVersion,
+    download_artifact_verified, download_maven_fallback, ensure_empty_dir, libraries_dir,
+    library_path_from_name, loader_version_id, target_version_dir, unzip_jar, version_dir,
+    InstallMethod, InstallRequest, InstalledVersion,
 };
 
 // ===== generated version JSON structures =====
@@ -133,6 +134,10 @@ pub fn apply_mirror_to_json(
 ///
 /// `by` is an optional attribution for progress output (e.g. `Fabric 0.20.0`); when set, a
 /// `Downloaded <file> by <by>` line is printed after the file lands.
+///
+/// When `registry_dir` is set, the file is cached globally under it (keyed by Maven path) and
+/// *copied* into `libraries/`, so re-installing the same loader never re-downloads. The cache is
+/// checksum-verified (authoritative Maven `.sha1`/`.sha256`/`.md5`, then persisted for offline use).
 pub async fn download_library(
     http: &reqwest::Client,
     name: &str,
@@ -141,6 +146,7 @@ pub async fn download_library(
     mirror: &Mirror,
     urls: &ManifestUrls,
     by: Option<&str>,
+    registry_dir: Option<&Path>,
 ) -> Result<(), MdtError> {
     let rel = library_path_from_name(name)?;
     let dest = libraries_dir(root).join(&rel);
@@ -150,7 +156,9 @@ pub async fn download_library(
     }
     let upstream = format!("{}/{}", base_url.trim_end_matches('/'), rel);
     eprintln!("[mdt] download_library: {name} from {upstream}");
-    download_maven_fallback(http, &upstream, &dest, mirror, urls).await?;
+
+    download_artifact_verified(http, &upstream, &dest, mirror, urls, registry_dir, &rel).await?;
+
     if let Some(by) = by {
         let file_name = rel.rsplit('/').next().unwrap_or(rel.as_str());
         eprintln!("Downloaded {file_name} by {by}");
@@ -221,6 +229,7 @@ pub async fn install_from_profile(
         .ok_or_else(|| MdtError::InvalidManifest("loader profile is missing a `libraries` array".to_string()))?;
 
     let by = format!("{} {}", req.loader.display_name(), req.loader_version);
+    let reg_dir = registry::modloader_dir(req.loader.display_name(), &req.loader_version);
     for lib in &libs {
         let name = lib
             .get("name")
@@ -231,7 +240,7 @@ pub async fn install_from_profile(
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .ok_or_else(|| MdtError::InvalidManifest("loader profile library is missing `url`".to_string()))?;
-        download_library(http, name, base, &req.root_dir, &req.mirror, urls, Some(&by)).await?;
+        download_library(http, name, base, &req.root_dir, &req.mirror, urls, Some(&by), Some(&reg_dir)).await?;
     }
 
     let profile = apply_mirror_to_json(profile, &req.mirror, urls);
@@ -323,4 +332,217 @@ pub async fn read_vanilla_launch_args(
     let args = v.get("minecraftArguments").and_then(|a| a.as_str()).map(String::from);
     let main = v.get("mainClass").and_then(|m| m.as_str()).map(String::from);
     Ok((args, main))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha1::{Digest, Sha1};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_dir(tag: &str) -> PathBuf {
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("mdt-vjson-{tag}-{}-{n}", std::process::id()))
+    }
+
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
+    #[tokio::test]
+    async fn download_library_copies_from_modloader_cache_without_network() {
+        let root = unique_dir("root");
+        let reg_dir = unique_dir("registry");
+        let name = "net.fabricmc:fabric-loader:0.15.11";
+        let rel = library_path_from_name(name).unwrap();
+        let content = b"fake-jar-bytes";
+        let hash = hex::encode(Sha1::digest(content));
+
+        // Pre-populate the global modloader cache with the jar AND its persisted checksum sidecar.
+        let cached = reg_dir.join(&rel);
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, content).unwrap();
+        std::fs::write(format!("{}.checksum", cached.display()), format!("{hash}\n")).unwrap();
+
+        let http = reqwest::Client::new();
+        let mirror = Mirror::Mojang;
+        let urls = ManifestUrls::try_new(&mirror).unwrap();
+
+        // Verified cache hit: the unreachable base_url must never be contacted.
+        download_library(
+            &http,
+            name,
+            "https://example.invalid/",
+            &root,
+            &mirror,
+            &urls,
+            None,
+            Some(&reg_dir),
+        )
+        .await
+        .unwrap();
+
+        let dest = libraries_dir(&root).join(&rel);
+        assert_eq!(std::fs::read(&dest).unwrap(), content);
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&reg_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn download_library_rejects_corrupted_cache() {
+        let root = unique_dir("root");
+        let reg_dir = unique_dir("registry");
+        let name = "net.fabricmc:fabric-loader:0.15.11";
+        let rel = library_path_from_name(name).unwrap();
+        let good_hash = hex::encode(Sha1::digest(b"good-bytes"));
+
+        // Cache jar is corrupted, but its sidecar claims the (now wrong) good hash.
+        let cached = reg_dir.join(&rel);
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, b"tampered").unwrap();
+        std::fs::write(format!("{}.checksum", cached.display()), format!("{good_hash}\n")).unwrap();
+
+        let http = reqwest::Client::new();
+        let mirror = Mirror::Mojang;
+        let urls = ManifestUrls::try_new(&mirror).unwrap();
+
+        // The corrupted cache is rejected, so it falls through to a network download, which fails
+        // because the base_url is unreachable.
+        let err = download_library(
+            &http,
+            name,
+            "https://example.invalid/",
+            &root,
+            &mirror,
+            &urls,
+            None,
+            Some(&reg_dir),
+        )
+        .await
+        .unwrap_err();
+        assert!(!matches!(err, MdtError::ChecksumMismatch { .. }), "got {err:?}");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&reg_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn download_library_downloads_and_verifies_via_mock() {
+        let server = MockServer::start().await;
+        let content = b"fake-loader-jar".to_vec();
+        let sha1 = hex::encode(Sha1::digest(&content));
+        let jar_path = "/maven/net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar";
+
+        Mock::given(method("GET"))
+            .and(path(jar_path))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(content.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("{jar_path}.sha1").as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!("{sha1}\n")))
+            .mount(&server)
+            .await;
+
+        let root = unique_dir("dl-verify");
+        let reg_dir = unique_dir("dl-verify-registry");
+        let http = test_client();
+        let mirror = Mirror::Mojang;
+        let urls = ManifestUrls::try_new(&mirror).unwrap();
+
+        download_library(
+            &http,
+            "net.fabricmc:fabric-loader:0.15.11",
+            &format!("{}/maven", server.uri()),
+            &root,
+            &mirror,
+            &urls,
+            None,
+            Some(&reg_dir),
+        )
+        .await
+        .unwrap();
+
+        let rel = "net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar";
+        assert_eq!(std::fs::read(root.join("libraries").join(rel)).unwrap(), content);
+        assert_eq!(std::fs::read(reg_dir.join(rel)).unwrap(), content);
+        let sidecar = std::fs::read_to_string(format!("{}.checksum", reg_dir.join(rel).display())).unwrap();
+        assert_eq!(sidecar.trim(), sha1);
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&reg_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn download_library_rejects_checksum_mismatch() {
+        let server = MockServer::start().await;
+        let good = b"correct-bytes".to_vec();
+        let sha1 = hex::encode(Sha1::digest(&good));
+        let jar_path = "/maven/net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar";
+
+        Mock::given(method("GET"))
+            .and(path(jar_path))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"tampered".to_vec()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("{jar_path}.sha1").as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!("{sha1}\n")))
+            .mount(&server)
+            .await;
+
+        let root = unique_dir("dl-mismatch");
+        let reg_dir = unique_dir("dl-mismatch-registry");
+        let http = test_client();
+        let mirror = Mirror::Mojang;
+        let urls = ManifestUrls::try_new(&mirror).unwrap();
+
+        let err = download_library(
+            &http,
+            "net.fabricmc:fabric-loader:0.15.11",
+            &format!("{}/maven", server.uri()),
+            &root,
+            &mirror,
+            &urls,
+            None,
+            Some(&reg_dir),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, MdtError::ChecksumMismatch { .. }), "got {err:?}");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&reg_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn fetch_profile_json_falls_back_between_candidates() {
+        let server = MockServer::start().await;
+        let profile = r#"{"id":"x","libraries":[]}"#;
+
+        Mock::given(method("GET"))
+            .and(path("/primary.json"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/fallback.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(profile))
+            .mount(&server)
+            .await;
+
+        let http = test_client();
+        let primary = format!("{}/primary.json", server.uri());
+        let fallback = format!("{}/fallback.json", server.uri());
+        let (text, used) = fetch_profile_json(&http, &[primary, fallback]).await.unwrap();
+
+        assert!(used.ends_with("/fallback.json"), "used {used}");
+        assert_eq!(text, profile);
+    }
 }
