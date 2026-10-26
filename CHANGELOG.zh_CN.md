@@ -2,6 +2,9 @@
 
 ## [0.6.3 & 0.6.4] | 虚拟目录挂载
 
+> [!NOTE]
+> **v0.6.3 未被 Yank，因为它可能会在特定条件下不会导致 OS 错误 32（文件锁异常）**。如果你遇到了，更新到 v0.6.4 即可解决此问题，无需对你的现有代码进行修改。Linux / MacOS 可以选择停留在 v0.6.3 或更新至 v0.6.4，v0.6.4 的安全更新补丁仅针对于 Windows 平台。*顺带说一句：Windows Defender 你的胆子真的是肥嘟嘟的*（怒）
+
 - **虚拟目录**——全局注册表现在是「挂载」进本地 `.minecraft` 目录结构，而不是物理复制。对每个文件，MDT 依次尝试 **硬链接 → 符号链接 → 复制**：同盘安装即时且零额外占用，跨盘安装用符号链接，受限文件系统（FAT32、没有开发者模式的 Windows）则以复制回退并打印警告。`AssetRegistry`、`download_library` 和 LiteLoader 核心 JAR 都通过新的 `mdt::VirtualDir`（`mdt::virtual_dir::mount_all`）挂载；挂载失败由 `MdtError::VirtualDirMountFailed` 上报。瞬时的 Windows 文件锁（共享冲突，原始 OS 错误 32）会在落到下一策略前最多重试 3 次（间隔 50ms）。
 
 ## [0.6.2] | 确定了最低兼容的 Rust 版本

@@ -2,6 +2,9 @@
 
 ## [0.6.3 & 0.6.4] | Virtual directory mounting
 
+> [!NOTE]
+> **v0.6.3 has not been “yanked” because, under certain conditions, it may not trigger OS error 32 (file lock exception)**. If you encounter this issue, updating to v0.6.4 will resolve it without requiring any changes to your existing code. Linux and macOS users can choose to remain on v0.6.3 or update to v0.6.4; the security patch in v0.6.4 applies only to the Windows platform.
+
 - **Virtual directory** — the global registry is now *mounted* into the local `.minecraft` layout
   instead of physically copied. For every file MDT tries **hardlink → symlink → copy**, so same-volume
   installs are instant and free, cross-volume installs use a symlink, and restricted filesystems
