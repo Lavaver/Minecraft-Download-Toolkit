@@ -1,0 +1,143 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Lavaver/MDT/blob/main/docs/providers_schema.json",
+  "title": "MDT providers.toml",
+  "description": "Schema for MDT's mirror-provider configuration (providers.toml). Every top-level `[name]` section declares one provider; `mojang` and `bmclapi` are built-in and required. See docs/mirror_toml.md and docs/mirror_uri.md for the semantics.",
+  "type": "object",
+  "required": ["mojang", "bmclapi"],
+  "additionalProperties": {
+    "$ref": "#/definitions/provider"
+  },
+  "definitions": {
+    "provider": {
+      "type": "object",
+      "title": "Mirror provider",
+      "description": "The endpoint and download base URLs for one mirror source, plus its optional URL-rewrite rules.",
+      "required": [
+        "minecraft",
+        "forge",
+        "fabric",
+        "quilt",
+        "neoforge",
+        "liteloader",
+        "forge_maven",
+        "fabric_maven",
+        "quilt_maven",
+        "neoforge_maven",
+        "liteloader_base",
+        "fabric_meta",
+        "quilt_meta"
+      ],
+      "properties": {
+        "minecraft": {
+          "type": "string",
+          "format": "uri",
+          "description": "Minecraft version manifest (`version_manifest.json`)."
+        },
+        "forge": {
+          "type": "string",
+          "format": "uri",
+          "description": "Forge version manifest (`maven-metadata.json`)."
+        },
+        "fabric": {
+          "type": "string",
+          "format": "uri",
+          "description": "Fabric version manifest (meta v2 `versions` endpoint)."
+        },
+        "quilt": {
+          "type": "string",
+          "format": "uri",
+          "description": "Quilt version manifest (meta v3 `versions` endpoint)."
+        },
+        "neoforge": {
+          "type": "string",
+          "format": "uri",
+          "description": "NeoForge version manifest (Maven `maven-metadata.xml`)."
+        },
+        "liteloader": {
+          "type": "string",
+          "format": "uri",
+          "description": "LiteLoader version manifest (Maven XML or BMCLAPI list)."
+        },
+        "forge_maven": {
+          "type": "string",
+          "format": "uri",
+          "description": "Base URL of the Forge Maven repository."
+        },
+        "fabric_maven": {
+          "type": "string",
+          "format": "uri",
+          "description": "Base URL of the Fabric Maven repository."
+        },
+        "quilt_maven": {
+          "type": "string",
+          "format": "uri",
+          "description": "Base URL of the Quilt Maven repository."
+        },
+        "neoforge_maven": {
+          "type": "string",
+          "format": "uri",
+          "description": "Base URL of the NeoForge Maven repository."
+        },
+        "liteloader_base": {
+          "type": "string",
+          "format": "uri",
+          "description": "Base URL for LiteLoader core JAR downloads."
+        },
+        "fabric_meta": {
+          "type": "string",
+          "format": "uri",
+          "description": "Fabric meta base URL, joined with the `/v2/versions/...` profile path."
+        },
+        "quilt_meta": {
+          "type": "string",
+          "format": "uri",
+          "description": "Quilt meta base URL, joined with the `/v3/versions/...` profile path."
+        },
+        "maven_exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Substrings whose URLs `apply_maven_mirror` must leave untouched (e.g. `maven.quiltmc.org`)."
+        },
+        "mirror": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/rewrite"
+          },
+          "default": [],
+          "description": "Ordered URL rewrites applied by `ManifestUrls::apply_mirror` (asset / version-JSON URLs)."
+        },
+        "maven": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/rewrite"
+          },
+          "default": [],
+          "description": "Ordered URL rewrites applied by `ManifestUrls::apply_maven_mirror` (Maven base URLs)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "rewrite": {
+      "type": "object",
+      "title": "URL rewrite rule",
+      "description": "A `from` -> `to` substring replacement, applied in declaration order.",
+      "required": ["from", "to"],
+      "properties": {
+        "from": {
+          "type": "string",
+          "description": "Substring to replace in the original URL."
+        },
+        "to": {
+          "type": "string",
+          "format": "uri",
+          "description": "Replacement URL prefix."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
