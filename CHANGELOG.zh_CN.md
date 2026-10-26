@@ -1,8 +1,8 @@
 # 更新日志
 
-## [0.6.3] | 虚拟目录挂载
+## [0.6.3 & 0.6.4] | 虚拟目录挂载
 
-- **虚拟目录**——全局注册表现在是「挂载」进本地 `.minecraft` 目录结构，而不是物理复制。对每个文件，MDT 依次尝试 **硬链接 → 符号链接 → 复制**：同盘安装即时且零额外占用，跨盘安装用符号链接，受限文件系统（FAT32、没有开发者模式的 Windows）则以复制回退并打印警告。`AssetRegistry`、`download_library` 和 LiteLoader 核心 JAR 都通过新的 `mdt::VirtualDir`（`mdt::virtual_dir::mount_all`）挂载；挂载失败由 `MdtError::VirtualDirMountFailed` 上报。
+- **虚拟目录**——全局注册表现在是「挂载」进本地 `.minecraft` 目录结构，而不是物理复制。对每个文件，MDT 依次尝试 **硬链接 → 符号链接 → 复制**：同盘安装即时且零额外占用，跨盘安装用符号链接，受限文件系统（FAT32、没有开发者模式的 Windows）则以复制回退并打印警告。`AssetRegistry`、`download_library` 和 LiteLoader 核心 JAR 都通过新的 `mdt::VirtualDir`（`mdt::virtual_dir::mount_all`）挂载；挂载失败由 `MdtError::VirtualDirMountFailed` 上报。瞬时的 Windows 文件锁（共享冲突，原始 OS 错误 32）会在落到下一策略前最多重试 3 次（间隔 50ms）。
 
 ## [0.6.2] | 确定了最低兼容的 Rust 版本
 

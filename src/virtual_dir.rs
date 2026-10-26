@@ -11,7 +11,9 @@
 //! The registry content is never re-hashed here: hashes were already verified at download time, so
 //! mounting only sets up the link.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
 
@@ -19,6 +21,13 @@ use crate::error::MdtError;
 
 /// Default concurrency for batch mounting. Bounded so we never exhaust file descriptors.
 pub const DEFAULT_MOUNT_CONCURRENCY: usize = 32;
+
+/// How many times to retry a mount operation that keeps hitting a transient file lock
+/// (Windows sharing violation, error 32).
+const MAX_LOCK_RETRIES: usize = 3;
+
+/// Delay between file-lock retries.
+const RETRY_BACKOFF: Duration = Duration::from_millis(50);
 
 /// A single virtual mount: `source` (global registry) -> `target` (local `.minecraft`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,8 +95,8 @@ async fn mount_file(source: &Path, target: &Path) -> Result<(), MdtError> {
     }
 
     // Replace any stale target (a physical file, a wrong symlink, or a broken symlink). Removing a
-    // hardlink/symlink never touches the registry source.
-    match tokio::fs::remove_file(target).await {
+    // hardlink/symlink never touches the registry source. Retry on transient Windows file locks.
+    match retry_io(|| tokio::fs::remove_file(target)).await {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
@@ -99,12 +108,12 @@ async fn mount_file(source: &Path, target: &Path) -> Result<(), MdtError> {
     }
 
     // 1. Hardlink — instant, zero extra space; only works within one volume.
-    if tokio::fs::hard_link(source, target).await.is_ok() {
+    if retry_io(|| tokio::fs::hard_link(source, target)).await.is_ok() {
         return Ok(());
     }
 
     // 2. Symlink — works cross-volume on Unix, needs privileges on Windows.
-    if symlink_file(source, target).await.is_ok() {
+    if retry_io(|| symlink_file(source, target)).await.is_ok() {
         return Ok(());
     }
 
@@ -113,8 +122,37 @@ async fn mount_file(source: &Path, target: &Path) -> Result<(), MdtError> {
         "[mdt] WARN: Hardlink/Symlink failed. Falling back to physical copy for {}.",
         target.display()
     );
-    tokio::fs::copy(source, target).await?;
+    retry_io(|| tokio::fs::copy(source, target)).await?;
     Ok(())
+}
+
+/// Retry a fallible I/O operation while it keeps failing with a transient file-lock error
+/// (Windows sharing violation, error 32). Non-lock errors and success return immediately.
+async fn retry_io<T, F, Fut>(mut op: F) -> std::io::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = std::io::Result<T>>,
+{
+    let mut attempts = 0;
+    loop {
+        return match op().await {
+            Ok(value) => Ok(value),
+            Err(e) => {
+                if attempts < MAX_LOCK_RETRIES && is_file_lock_error(&e) {
+                    attempts += 1;
+                    tokio::time::sleep(RETRY_BACKOFF).await;
+                    continue;
+                }
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Whether an I/O error is a transient Windows file-lock (sharing violation, raw OS error 32).
+/// On non-Windows platforms this is always `false`.
+fn is_file_lock_error(e: &std::io::Error) -> bool {
+    cfg!(windows) && e.raw_os_error() == Some(32)
 }
 
 /// Create a file symlink using the platform-appropriate API.
@@ -175,5 +213,14 @@ mod tests {
         assert_eq!(std::fs::read(&src).unwrap(), b"good");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn is_file_lock_error_detects_windows_sharing_violation() {
+        let e = std::io::Error::from_raw_os_error(32);
+        #[cfg(windows)]
+        assert!(is_file_lock_error(&e));
+        #[cfg(not(windows))]
+        assert!(!is_file_lock_error(&e));
     }
 }
