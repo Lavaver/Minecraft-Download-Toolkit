@@ -14,6 +14,7 @@
 
 use std::path::Path;
 
+use crate::customize::{Downloader, ProgressReporter};
 use crate::downloader::{self, DownloadTask};
 use crate::error::MdtError;
 use crate::mirror::Mirror;
@@ -28,19 +29,20 @@ use super::{read_vanilla_version_id, version_json_path};
 /// `loader` names the loader being removed for error context; the revert itself is driven entirely
 /// by the vanilla-manifest comparison, so it is safe to call repeatedly.
 pub async fn uninstall_modloader(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     root: &Path,
     vanilla_dir: &Path,
     loader: ModLoader,
     mirror: &Mirror,
     concurrency: usize,
+    reporter: &dyn ProgressReporter,
 ) -> Result<(), MdtError> {
     // 1. Identify the base Minecraft version from the on-disk version JSON `id` field.
     let mc_version = read_vanilla_version_id(vanilla_dir).await?;
 
     // 2. Fetch the base manifest; the raw text is kept for step 6.
     let (vanilla_text, version_json) =
-        crate::manifest::fetch_version_json(http, mirror, &mc_version).await?;
+        crate::manifest::fetch_version_json(downloader, mirror, &mc_version).await?;
 
     // 3. Pre-load the official SHA-1 / file name / URL table into memory.
     let manifest = mcr::build_manifest(&version_json, root);
@@ -61,7 +63,7 @@ pub async fn uninstall_modloader(
     mcr::write_markers(&scan, &marker_dir).await?;
 
     // 5. Execute: restore modified, download created, delete removed.
-    execute_restore(http, mirror, concurrency, &scan).await?;
+    execute_restore(downloader, mirror, concurrency, &scan, reporter).await?;
 
     // 6. Rebuild the base Minecraft JSON.
     tokio::fs::write(&vanilla_json_path, &vanilla_text).await?;
@@ -80,10 +82,11 @@ pub async fn uninstall_modloader(
 
 /// Download/delete the files the scan flagged, reusing the SHA-1 verified downloader.
 async fn execute_restore(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     mirror: &Mirror,
     concurrency: usize,
     scan: &ScanResult,
+    reporter: &dyn ProgressReporter,
 ) -> Result<(), MdtError> {
     let urls = ManifestUrls::try_new(mirror)?;
 
@@ -103,7 +106,7 @@ async fn execute_restore(
         .collect();
 
     if !tasks.is_empty() {
-        downloader::execute_downloads(http, tasks, concurrency, mirror, &urls).await?;
+        downloader::execute_downloads(downloader, tasks, concurrency, mirror, &urls, reporter).await?;
     }
 
     for path in &scan.removed {

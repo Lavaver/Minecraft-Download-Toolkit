@@ -3,6 +3,7 @@
 //! * `1.13` and later — Method A (official installer + Java injection).
 //! * `1.12.2` and earlier — Method B (manual unpack).
 
+use crate::customize::Downloader;
 use crate::error::MdtError;
 use crate::mc_version::McVersion;
 use crate::modloader::ModLoader;
@@ -31,7 +32,7 @@ fn normalize_forge_version(mc_version: &str, loader_version: &str) -> String {
 }
 
 pub async fn install(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     req: InstallRequest,
 ) -> Result<InstalledVersion, MdtError> {
     let urls = ManifestUrls::try_new(&req.mirror)?;
@@ -43,14 +44,14 @@ pub async fn install(
     };
 
     if use_method_a {
-        install_modern(http, req, &urls).await
+        install_modern(downloader, req, &urls).await
     } else {
-        install_legacy(http, req, &urls).await
+        install_legacy(downloader, req, &urls).await
     }
 }
 
 async fn install_modern(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     req: InstallRequest,
     urls: &ManifestUrls,
 ) -> Result<InstalledVersion, MdtError> {
@@ -67,7 +68,7 @@ async fn install_modern(
     let reg_dir = registry::modloader_dir(req.loader.display_name(), &forge_version);
 
     install_via_official_installer(
-        http,
+        downloader,
         &installer_url,
         &req.root_dir,
         &req.mirror,
@@ -111,7 +112,7 @@ async fn install_modern(
 }
 
 async fn install_legacy(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     req: InstallRequest,
     urls: &ManifestUrls,
 ) -> Result<InstalledVersion, MdtError> {
@@ -122,7 +123,7 @@ async fn install_legacy(
         urls.forge_maven, maven_version, maven_version
     );
     install_legacy_forge(
-        http,
+        downloader,
         &installer_url,
         &req.root_dir,
         &req.mirror,

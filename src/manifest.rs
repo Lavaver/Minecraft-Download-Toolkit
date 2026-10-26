@@ -1,10 +1,10 @@
 //! Version-manifest types and fetch logic for Minecraft and its mod loaders.
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::customize::Downloader;
 use crate::error::MdtError;
 use crate::mc_version::McVersion;
 use crate::mirror::Mirror;
@@ -126,25 +126,19 @@ struct BmclapiLiteLoaderItem {
 
 // ===== fetching =====
 
-async fn get_text(http: &reqwest::Client, url: &str) -> Result<String, MdtError> {
-    let resp = http
-        .get(url)
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await?
-        .error_for_status()?;
-    Ok(resp.text().await?)
+async fn get_text(downloader: &dyn Downloader, url: &str) -> Result<String, MdtError> {
+    downloader.fetch(url).await
 }
 
 /// Try each candidate URL in order; return the first success, otherwise the last error.
 async fn fetch_text(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     candidates: &[&str],
     label: &str,
 ) -> Result<String, MdtError> {
     let mut last: Option<MdtError> = None;
     for &url in candidates {
-        match get_text(http, url).await {
+        match get_text(downloader, url).await {
             Ok(text) => return Ok(text),
             Err(e) => last = Some(e),
         }
@@ -154,14 +148,13 @@ async fn fetch_text(
 
 /// Fetch the Minecraft version manifest.
 pub async fn fetch_minecraft_version_manifest(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     mirror: &Mirror,
 ) -> Result<MinecraftVersionsList, MdtError> {
-    eprintln!("Updating {} index", mirror.label());
     let primary = ManifestUrls::try_new(mirror)?;
     let fallback = ManifestUrls::try_new(&mirror.other())?;
     let candidates = [primary.minecraft.as_str(), fallback.minecraft.as_str()];
-    let text = fetch_text(http, &candidates, "Minecraft version manifest").await?;
+    let text = fetch_text(downloader, &candidates, "Minecraft version manifest").await?;
     Ok(serde_json::from_str(&text)?)
 }
 
@@ -170,11 +163,11 @@ pub async fn fetch_minecraft_version_manifest(
 /// Returns the raw text (for round-tripping back to disk) and the parsed
 /// [`crate::downloader::VersionJson`].
 pub async fn fetch_version_json(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     mirror: &Mirror,
     version: &str,
 ) -> Result<(String, crate::downloader::VersionJson), MdtError> {
-    let manifest = fetch_minecraft_version_manifest(http, mirror).await?;
+    let manifest = fetch_minecraft_version_manifest(downloader, mirror).await?;
     let entry = manifest
         .versions
         .iter()
@@ -184,14 +177,7 @@ pub async fn fetch_version_json(
 
     let urls = ManifestUrls::try_new(mirror)?;
     let version_url = urls.apply_mirror(&entry.url, mirror);
-    let text = http
-        .get(&version_url)
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
+    let text = downloader.fetch(&version_url).await?;
     let version_json: crate::downloader::VersionJson = serde_json::from_str(&text)
         .map_err(|e| MdtError::JsonParseError(e).context(format!("parsing version JSON for {version}")))?;
     Ok((text, version_json))
@@ -199,72 +185,72 @@ pub async fn fetch_version_json(
 
 /// Fetch the Forge version manifest.
 pub async fn fetch_forge_manifest(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     mirror: &Mirror,
 ) -> Result<ForgeVersionsList, MdtError> {
     let primary = ManifestUrls::try_new(mirror)?;
     let fallback = ManifestUrls::try_new(&mirror.other())?;
     let candidates = [primary.forge.as_str(), fallback.forge.as_str()];
-    let text = fetch_text(http, &candidates, "Forge manifest").await?;
+    let text = fetch_text(downloader, &candidates, "Forge manifest").await?;
     Ok(serde_json::from_str(&text)?)
 }
 
 /// Fetch the Fabric version manifest.
 pub async fn fetch_fabric_manifest(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     mirror: &Mirror,
 ) -> Result<FabricVersionsList, MdtError> {
     let primary = ManifestUrls::try_new(mirror)?;
     let fallback = ManifestUrls::try_new(&mirror.other())?;
     let candidates = [primary.fabric.as_str(), fallback.fabric.as_str()];
-    let text = fetch_text(http, &candidates, "Fabric manifest").await?;
+    let text = fetch_text(downloader, &candidates, "Fabric manifest").await?;
     Ok(serde_json::from_str(&text)?)
 }
 
 /// Fetch the Quilt version manifest.
 pub async fn fetch_quilt_manifest(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     mirror: &Mirror,
 ) -> Result<QuiltVersionsList, MdtError> {
     let primary = ManifestUrls::try_new(mirror)?;
     let fallback = ManifestUrls::try_new(&mirror.other())?;
     let candidates = [primary.quilt.as_str(), fallback.quilt.as_str()];
-    let text = fetch_text(http, &candidates, "Quilt manifest").await?;
+    let text = fetch_text(downloader, &candidates, "Quilt manifest").await?;
     Ok(serde_json::from_str(&text)?)
 }
 
 /// Fetch the NeoForge version manifest (Maven XML).
 pub async fn fetch_neoforge_manifest(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     mirror: &Mirror,
 ) -> Result<MavenMetadata, MdtError> {
     let primary = ManifestUrls::try_new(mirror)?;
     let fallback = ManifestUrls::try_new(&mirror.other())?;
     let candidates = [primary.neoforge.as_str(), fallback.neoforge.as_str()];
-    let text = fetch_text(http, &candidates, "NeoForge manifest").await?;
+    let text = fetch_text(downloader, &candidates, "NeoForge manifest").await?;
     Ok(quick_xml::de::from_str(&text)?)
 }
 
 /// Fetch the LiteLoader version manifest, falling back to the opposite mirror on failure.
 pub async fn fetch_liteloader_manifest(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     mirror: &Mirror,
 ) -> Result<Vec<LiteLoaderVersionEntry>, MdtError> {
-    match fetch_liteloader_as(http, mirror).await {
+    match fetch_liteloader_as(downloader, mirror).await {
         Ok(entries) => Ok(entries),
-        Err(_) => fetch_liteloader_as(http, &mirror.other()).await,
+        Err(_) => fetch_liteloader_as(downloader, &mirror.other()).await,
     }
 }
 
 async fn fetch_liteloader_as(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     mirror: &Mirror,
 ) -> Result<Vec<LiteLoaderVersionEntry>, MdtError> {
     let urls = ManifestUrls::try_new(mirror)?;
     match mirror {
         // Custom mirrors are assumed to serve the official Maven-XML format, like Mojang.
         Mirror::Mojang | Mirror::Custom(_) => {
-            let text = fetch_text(http, &[urls.liteloader.as_str()], "LiteLoader manifest").await?;
+            let text = fetch_text(downloader, &[urls.liteloader.as_str()], "LiteLoader manifest").await?;
             let meta: MavenMetadata = quick_xml::de::from_str(&text)?;
             Ok(meta
                 .versioning
@@ -283,7 +269,7 @@ async fn fetch_liteloader_as(
                 .collect())
         }
         Mirror::BMCLAPI => {
-            let text = fetch_text(http, &[urls.liteloader.as_str()], "LiteLoader manifest").await?;
+            let text = fetch_text(downloader, &[urls.liteloader.as_str()], "LiteLoader manifest").await?;
             let entries: Vec<BmclapiLiteLoaderItem> = serde_json::from_str(&text)?;
             Ok(entries
                 .into_iter()
@@ -312,16 +298,16 @@ pub struct ManifestData {
 
 /// Fetch every manifest concurrently.
 pub async fn fetch_all_manifests(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     mirror: &Mirror,
 ) -> Result<ManifestData, MdtError> {
     let (minecraft, forge, fabric, quilt, neoforge, liteloader) = tokio::try_join!(
-        fetch_minecraft_version_manifest(http, mirror),
-        fetch_forge_manifest(http, mirror),
-        fetch_fabric_manifest(http, mirror),
-        fetch_quilt_manifest(http, mirror),
-        fetch_neoforge_manifest(http, mirror),
-        fetch_liteloader_manifest(http, mirror),
+        fetch_minecraft_version_manifest(downloader, mirror),
+        fetch_forge_manifest(downloader, mirror),
+        fetch_fabric_manifest(downloader, mirror),
+        fetch_quilt_manifest(downloader, mirror),
+        fetch_neoforge_manifest(downloader, mirror),
+        fetch_liteloader_manifest(downloader, mirror),
     )?;
 
     Ok(ManifestData {
@@ -422,11 +408,12 @@ pub fn neoforge_mc_prefix(mc_version: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::customize::HttpDownloader;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn test_client() -> reqwest::Client {
-        reqwest::Client::builder().no_proxy().build().unwrap()
+    fn test_client() -> HttpDownloader {
+        HttpDownloader::new(reqwest::Client::builder().no_proxy().build().unwrap())
     }
 
     #[tokio::test]
@@ -443,10 +430,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let http = test_client();
+        let downloader = test_client();
         let primary = format!("{}/primary", server.uri());
         let fallback = format!("{}/fallback", server.uri());
-        let text = fetch_text(&http, &[primary.as_str(), fallback.as_str()], "test")
+        let text = fetch_text(&downloader, &[primary.as_str(), fallback.as_str()], "test")
             .await
             .unwrap();
         assert_eq!(text, "ok");
@@ -466,10 +453,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let http = test_client();
+        let downloader = test_client();
         let a = format!("{}/a", server.uri());
         let b = format!("{}/b", server.uri());
-        let err = fetch_text(&http, &[a.as_str(), b.as_str()], "test").await.unwrap_err();
+        let err = fetch_text(&downloader, &[a.as_str(), b.as_str()], "test").await.unwrap_err();
         assert!(matches!(err, MdtError::NetworkError(_)), "got {err:?}");
     }
 }

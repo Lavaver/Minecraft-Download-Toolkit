@@ -1,5 +1,6 @@
 //! NeoForge loader installation (Method A: modern injection).
 
+use crate::customize::Downloader;
 use crate::error::MdtError;
 use crate::modloader::ModLoader;
 use crate::registry;
@@ -12,7 +13,7 @@ use super::{
 };
 
 pub async fn install(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     req: InstallRequest,
 ) -> Result<InstalledVersion, MdtError> {
     let urls = ManifestUrls::try_new(&req.mirror)?;
@@ -28,7 +29,7 @@ pub async fn install(
     let reg_dir = registry::modloader_dir(req.loader.display_name(), &req.loader_version);
 
     install_via_official_installer(
-        http,
+        downloader,
         &installer_url,
         &req.root_dir,
         &req.mirror,

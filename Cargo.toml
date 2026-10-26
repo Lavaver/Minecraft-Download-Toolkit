@@ -3,7 +3,7 @@ members = ["mdt-macros"]
 
 [package]
 name = "mdt-minecraft"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 description = "Minecraft Download Toolkit - an ergonomic, low-level library for downloading and installing Minecraft versions and mod loaders."
 license = "MIT"

@@ -4,16 +4,17 @@
 //! manifest SHA-1, applies mirror rewriting, filters library rules, and extracts natives.
 
 use std::collections::HashMap;
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
 use futures::FutureExt;
+
+use crate::customize::{Downloader, ProgressReporter};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 
 use crate::error::MdtError;
 use crate::mirror::Mirror;
@@ -162,15 +163,15 @@ fn evaluate_rules(rules: &Option<Vec<Rule>>) -> bool {
 
 /// Execute a batch of download tasks concurrently, verifying each against its SHA-1.
 ///
-/// An empty task queue is treated as an error rather than a silent success. Progress is printed to
-/// stderr as a bottom-pinned, Cargo-style `Downloading x/y Component(s) ...` line (updated in place
-/// with `\r` when stderr is a terminal; plain lines otherwise).
+/// An empty task queue is treated as an error rather than a silent success. Progress is reported
+/// through `reporter` (`Downloading x/y Component(s) ...` updates, throttled to ~10 per batch).
 pub async fn execute_downloads(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     tasks: Vec<DownloadTask>,
     concurrency: usize,
     mirror: &Mirror,
     urls: &ManifestUrls,
+    reporter: &dyn ProgressReporter,
 ) -> Result<(), MdtError> {
     if tasks.is_empty() {
         return Err(MdtError::InvalidManifest(
@@ -179,17 +180,40 @@ pub async fn execute_downloads(
     }
 
     let concurrency = concurrency.max(1);
-    let progress = Arc::new(Progress::new(tasks.len()));
+    let total = tasks.len();
+    let report_every = (total / 10).max(1);
+    reporter.progress(0, total);
+
+    let throttle = Arc::new(Mutex::new(Throttle {
+        done: 0,
+        next_report: report_every,
+    }));
     let failed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     let results = stream::iter(tasks.into_iter().map(|task| {
-        let progress = Arc::clone(&progress);
+        let throttle = Arc::clone(&throttle);
         let failed = Arc::clone(&failed);
         let label = task.label.clone();
         let by = task.by.clone();
-        download_single_file(task, mirror, urls, http, failed).map(move |res| {
+        download_single_file(task, mirror, urls, downloader, failed).map(move |res| {
             let downloaded = matches!(&res, Ok(true));
-            progress.complete(downloaded, label.as_deref(), by.as_deref());
+            let mut t = throttle.lock().unwrap();
+            t.done += 1;
+            let done = t.done;
+            let report = done >= t.next_report || done == total;
+            if report {
+                t.next_report = done + report_every;
+            }
+            drop(t);
+
+            if downloaded {
+                if let (Some(label), Some(by)) = (&label, &by) {
+                    reporter.status(&format!("Downloaded {label} by {by}"));
+                }
+            }
+            if report {
+                reporter.progress(done, total);
+            }
             res
         })
     }))
@@ -197,7 +221,7 @@ pub async fn execute_downloads(
     .collect::<Vec<_>>()
     .await;
 
-    progress.finish();
+    reporter.finish();
 
     // Fatal errors (local I/O, native extraction) fail the whole batch; file-level network
     // failures were already soft-handled and recorded in `failed`.
@@ -213,97 +237,10 @@ pub async fn execute_downloads(
     }
 }
 
-/// A bottom-pinned, throttled progress line for [`execute_downloads`].
-///
-/// All stderr writes for a batch are serialized behind one mutex, so concurrent tasks never
-/// interleave. When stderr is a terminal the `Downloading x/y ...` line is rewritten in place with
-/// `\r` and `Downloaded ...` status lines are printed above it; otherwise every update is a plain
-/// line so redirected output stays readable.
-struct Progress {
-    total: usize,
-    report_every: usize,
-    interactive: bool,
-    inner: Mutex<ProgressInner>,
-}
-
-struct ProgressInner {
+/// Progress throttling state for [`execute_downloads`].
+struct Throttle {
     done: usize,
     next_report: usize,
-    line: String,
-}
-
-impl Progress {
-    fn new(total: usize) -> Self {
-        let report_every = (total / 10).max(1);
-        let interactive = std::io::stderr().is_terminal();
-        let line = format!("Downloading 0/{total} Component(s) ...");
-        if interactive {
-            eprint!("{line}");
-        } else {
-            eprintln!("{line}");
-        }
-        Progress {
-            total,
-            report_every,
-            interactive,
-            inner: Mutex::new(ProgressInner {
-                done: 0,
-                next_report: report_every,
-                line,
-            }),
-        }
-    }
-
-    /// Record one finished task; optionally print a `Downloaded ...` status line above the pinned
-    /// progress line.
-    fn complete(&self, downloaded: bool, label: Option<&str>, by: Option<&str>) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.done += 1;
-        let done = inner.done;
-        let report = done >= inner.next_report || done == self.total;
-        if report {
-            inner.next_report = done + self.report_every;
-            inner.line = format!("Downloading {done}/{} Component(s) ...", self.total);
-        }
-
-        let status = match (downloaded, label, by) {
-            (true, Some(label), Some(by)) => Some(format!("Downloaded {label} by {by}")),
-            _ => None,
-        };
-
-        match status {
-            Some(status) => {
-                if self.interactive {
-                    // Erase the pinned line, print the status line, then re-render the pinned line
-                    // below it so it stays at the bottom.
-                    let width = inner.line.chars().count();
-                    eprint!("\r{}\r{status}\n{}", " ".repeat(width), inner.line);
-                } else {
-                    eprintln!("{status}");
-                    if report {
-                        eprintln!("{}", inner.line);
-                    }
-                }
-            }
-            None => {
-                if report {
-                    if self.interactive {
-                        eprint!("\r{}", inner.line);
-                    } else {
-                        eprintln!("{}", inner.line);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Terminate the pinned line with a newline so later output starts on a fresh line.
-    fn finish(&self) {
-        if self.interactive {
-            let _guard = self.inner.lock().unwrap();
-            eprintln!();
-        }
-    }
 }
 
 /// Stream a file in chunks and compute its SHA-1, avoiding loading the whole file into memory.
@@ -332,22 +269,22 @@ async fn download_file_stream(
     task: &DownloadTask,
     mirror: &Mirror,
     urls: &ManifestUrls,
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
 ) -> Result<(), MdtError> {
     let candidates = fallback_urls(task, mirror, urls);
-    download_from_candidates(task, &candidates, http).await
+    download_from_candidates(task, &candidates, downloader).await
 }
 
 /// Try each candidate URL in order, verifying SHA-1, and return the first success.
 async fn download_from_candidates(
     task: &DownloadTask,
     candidates: &[String],
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
 ) -> Result<(), MdtError> {
     let mut last_err: Option<MdtError> = None;
 
     for url in candidates {
-        match download_from_url(task, url, http).await {
+        match download_from_url(task, url, downloader).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 // Remove any partial file so the next candidate (or a later pre-check) doesn't
@@ -397,12 +334,25 @@ fn fallback_urls(task: &DownloadTask, mirror: &Mirror, urls: &ManifestUrls) -> V
 async fn download_from_url(
     task: &DownloadTask,
     url: &str,
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
 ) -> Result<(), MdtError> {
-    let resp = http.get(url).send().await?.error_for_status()?;
     let tmp = temp_path(&task.dest_path);
 
-    let result = download_body_to_temp(resp, &tmp, task).await;
+    let result = async {
+        downloader.download(url, &tmp).await?;
+        let actual = sha1_file(&tmp).await?;
+        if actual != task.sha1 {
+            return Err(MdtError::ChecksumMismatch {
+                path: task.dest_path.display().to_string(),
+                expected: task.sha1.clone(),
+                actual,
+            });
+        }
+        tokio::fs::rename(&tmp, &task.dest_path).await?;
+        Ok::<_, MdtError>(())
+    }
+    .await;
+
     if result.is_err() {
         let _ = tokio::fs::remove_file(&tmp).await;
     }
@@ -412,35 +362,6 @@ async fn download_from_url(
 /// The temporary sibling path used while a file is being downloaded and verified.
 fn temp_path(dest: &Path) -> PathBuf {
     PathBuf::from(format!("{}.mdt-download", dest.display()))
-}
-
-/// Stream a response body to `tmp`, verify its SHA-1, and rename it onto the final destination.
-async fn download_body_to_temp(
-    resp: reqwest::Response,
-    tmp: &Path,
-    task: &DownloadTask,
-) -> Result<(), MdtError> {
-    let mut file = tokio::fs::File::create(tmp).await?;
-    let mut stream = resp.bytes_stream();
-    let mut hasher = Sha1::new();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        hasher.update(&chunk);
-        file.write_all(&chunk).await?;
-    }
-    file.flush().await?;
-
-    let actual = hex::encode(hasher.finalize());
-    if actual != task.sha1 {
-        return Err(MdtError::ChecksumMismatch {
-            path: task.dest_path.display().to_string(),
-            expected: task.sha1.clone(),
-            actual,
-        });
-    }
-    tokio::fs::rename(tmp, &task.dest_path).await?;
-    Ok(())
 }
 
 /// How many times to retry a failed download (after the initial attempt) before soft-failing it.
@@ -462,7 +383,7 @@ async fn download_with_retries(
     task: &DownloadTask,
     mirror: &Mirror,
     urls: &ManifestUrls,
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
 ) -> Result<(), MdtError> {
     let mut last_err = None;
     for attempt in 0..=MAX_DOWNLOAD_RETRIES {
@@ -471,7 +392,7 @@ async fn download_with_retries(
             let jitter = Duration::from_millis(jitter_millis());
             tokio::time::sleep(base + jitter).await;
         }
-        match download_file_stream(task, mirror, urls, http).await {
+        match download_file_stream(task, mirror, urls, downloader).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 let _ = tokio::fs::remove_file(&task.dest_path).await;
@@ -493,7 +414,7 @@ async fn download_single_file(
     task: DownloadTask,
     mirror: &Mirror,
     urls: &ManifestUrls,
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     failed: Arc<Mutex<Vec<String>>>,
 ) -> Result<bool, MdtError> {
     // 1. Pre-check: skip if the file already exists and its SHA-1 matches.
@@ -516,7 +437,7 @@ async fn download_single_file(
         if let Some(parent) = task.dest_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        if let Err(e) = download_with_retries(&task, mirror, urls, http).await {
+        if let Err(e) = download_with_retries(&task, mirror, urls, downloader).await {
             eprintln!(
                 "[mdt] WARN: Failed to download {} after {MAX_DOWNLOAD_RETRIES} retries ({e}). Skipping...",
                 task.url
@@ -683,6 +604,7 @@ mod tests {
         download_from_candidates, download_from_url, evaluate_rules, execute_downloads,
         fallback_urls, DownloadTask, OsRule, Rule,
     };
+    use crate::customize::{HttpDownloader, ProgressReporter, StderrReporter};
     use crate::error::MdtError;
     use crate::mirror::Mirror;
     use crate::urls::ManifestUrls;
@@ -716,10 +638,10 @@ mod tests {
         }
     }
 
-    /// An HTTP client that ignores any system proxy, so tests always reach the local mock
-    /// server (reqwest 0.13 otherwise routes through the OS proxy, which 404s `127.0.0.1`).
-    fn test_client() -> reqwest::Client {
-        reqwest::Client::builder().no_proxy().build().unwrap()
+    /// A downloader over an HTTP client that ignores any system proxy, so tests always reach the
+    /// local mock server (reqwest 0.13 otherwise routes through the OS proxy, which 404s `127.0.0.1`).
+    fn test_client() -> HttpDownloader {
+        HttpDownloader::new(reqwest::Client::builder().no_proxy().build().unwrap())
     }
 
     // ===== fallback_urls =====
@@ -968,7 +890,7 @@ mod tests {
         let urls = ManifestUrls::try_new(&Mirror::Mojang).unwrap();
         let http = test_client();
 
-        execute_downloads(&http, vec![task_a, task_b], 2, &Mirror::Mojang, &urls)
+        execute_downloads(&http, vec![task_a, task_b], 2, &Mirror::Mojang, &urls, &StderrReporter::default())
             .await
             .unwrap();
 
@@ -982,10 +904,59 @@ mod tests {
     async fn execute_downloads_empty_tasks_is_error() {
         let urls = ManifestUrls::try_new(&Mirror::Mojang).unwrap();
         let http = test_client();
-        let err = execute_downloads(&http, vec![], 3, &Mirror::Mojang, &urls)
+        let err = execute_downloads(&http, vec![], 3, &Mirror::Mojang, &urls, &StderrReporter::default())
             .await
             .unwrap_err();
         assert!(matches!(err, MdtError::InvalidManifest(_)), "got {err:?}");
+    }
+
+    #[derive(Default)]
+    struct CollectingReporter {
+        events: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl ProgressReporter for CollectingReporter {
+        fn status(&self, line: &str) {
+            self.events.lock().unwrap().push(format!("status:{line}"));
+        }
+        fn progress(&self, done: usize, total: usize) {
+            self.events.lock().unwrap().push(format!("progress:{done}/{total}"));
+        }
+        fn finish(&self) {
+            self.events.lock().unwrap().push("finish".to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_downloads_reports_through_custom_reporter() {
+        let server = MockServer::start().await;
+        let content = b"asset".to_vec();
+        Mock::given(method("GET"))
+            .and(path("/a.bin"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(content.clone()))
+            .mount(&server)
+            .await;
+
+        let dest = unique_path("reporter");
+        let task = test_task(&format!("{}/a.bin", server.uri()), &dest, &content);
+        let mut task = task;
+        task.label = Some("a.bin".to_string());
+        task.by = Some("Minecraft 1.20.1".to_string());
+
+        let urls = ManifestUrls::try_new(&Mirror::Mojang).unwrap();
+        let http = test_client();
+        let reporter = CollectingReporter::default();
+
+        execute_downloads(&http, vec![task], 1, &Mirror::Mojang, &urls, &reporter)
+            .await
+            .unwrap();
+
+        let events = reporter.events.lock().unwrap();
+        assert!(events.iter().any(|e| e == "status:Downloaded a.bin by Minecraft 1.20.1"), "{events:?}");
+        assert!(events.iter().any(|e| e == "progress:1/1"), "{events:?}");
+        assert!(events.iter().any(|e| e == "finish"), "{events:?}");
+
+        let _ = std::fs::remove_file(&dest);
     }
 
     // ===== evaluate_rules =====

@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.1] | Routine Feature Updates
+
+- **Customization traits** — a set of public extension traits (`ProgressReporter`, `Downloader`,
+  `RegistryCache`) with working defaults (`StderrReporter`, `HttpDownloader`, `FsRegistryCache`).
+  `ProgressReporter` and `Downloader` are wired into the hot path and injectable via
+  `MdtClientBuilder::progress_reporter` / `::downloader`; `Downloader` now covers both file
+  (`download`) and metadata (`fetch`) so the entire transport — not just progress — is swappable.
+  `RegistryCache` ships as a content-addressed byte-store building block (`FsRegistryCache`).
+
 ## [0.6.0] | Registry & Security Update
 
 - **Resilient downloads** — a single asset timing out or dropping the connection no longer aborts

@@ -1,8 +1,10 @@
 //! The [`MdtClient`] and its builder.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::asset::AssetRegistry;
+use crate::customize::{Downloader, HttpDownloader, ProgressReporter, StderrReporter};
 use crate::downloader::{self, VersionJson};
 use crate::error::MdtError;
 use crate::http;
@@ -39,12 +41,14 @@ const DEFAULT_CONCURRENCY: usize = 3;
 ///     Ok(())
 /// }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MdtClient {
     http: reqwest::Client,
+    downloader: Arc<dyn Downloader>,
     mirror: Mirror,
     root: PathBuf,
     concurrency: usize,
+    reporter: Arc<dyn ProgressReporter>,
 }
 
 impl MdtClient {
@@ -57,6 +61,11 @@ impl MdtClient {
     /// The shared HTTP client (connection-pooled, with a browser User-Agent).
     pub fn http(&self) -> &reqwest::Client {
         &self.http
+    }
+
+    /// The active transport (files and metadata).
+    pub fn downloader(&self) -> &dyn Downloader {
+        self.downloader.as_ref()
     }
 
     /// The active mirror source.
@@ -84,7 +93,8 @@ impl MdtClient {
 
     /// Fetch the list of available Minecraft versions.
     pub async fn versions(&self) -> Result<Vec<VersionEntry>, MdtError> {
-        let manifest = manifest::fetch_minecraft_version_manifest(&self.http, &self.mirror).await?;
+        self.reporter.status(&format!("Updating {} index", self.mirror.label()));
+        let manifest = manifest::fetch_minecraft_version_manifest(self.downloader.as_ref(), &self.mirror).await?;
         Ok(manifest.versions)
     }
 
@@ -99,8 +109,9 @@ impl MdtClient {
     /// * [`MdtError::VersionNotFound`] if `version` isn't in the manifest.
     /// * [`MdtError::NetworkError`] / [`MdtError::ChecksumMismatch`] on download failures.
     pub async fn install_vanilla(&self, version: &str) -> Result<VersionJson, MdtError> {
+        self.reporter.status(&format!("Updating {} index", self.mirror.label()));
         let (text, version_json) =
-            manifest::fetch_version_json(&self.http, &self.mirror, version).await?;
+            manifest::fetch_version_json(self.downloader.as_ref(), &self.mirror, version).await?;
         let urls = ManifestUrls::try_new(&self.mirror)?;
 
         // Save the vanilla version JSON.
@@ -110,7 +121,15 @@ impl MdtClient {
 
         // Client JAR + libraries (+ asset index). Vanilla stays untouched.
         let tasks = downloader::build_tasks_from_version_json(&version_json, &self.root);
-        downloader::execute_downloads(&self.http, tasks, self.concurrency, &self.mirror, &urls).await?;
+        downloader::execute_downloads(
+            self.downloader.as_ref(),
+            tasks,
+            self.concurrency,
+            &self.mirror,
+            &urls,
+            self.reporter.as_ref(),
+        )
+        .await?;
 
         // Assets: fetch the index (via the global index cache), then sync the global registry
         // cache into `assets/objects`.
@@ -119,9 +138,10 @@ impl MdtClient {
                 &self.root,
                 asset_index,
                 &version_json.id,
-                &self.http,
+                self.downloader.as_ref(),
                 &self.mirror,
                 &urls,
+                self.reporter.as_ref(),
             )
             .await?;
         }
@@ -186,8 +206,9 @@ impl MdtClient {
             root_dir: self.root.clone(),
             mirror: self.mirror.clone(),
             target_dir,
+            reporter: self.reporter.clone(),
         };
-        installer::install_modloader(&self.http, req).await
+        installer::install_modloader(self.downloader.as_ref(), req).await
     }
 
     /// Install a complete stack — vanilla and then a mod loader — in one call.
@@ -250,23 +271,25 @@ impl MdtClient {
         loader: ModLoader,
     ) -> Result<(), MdtError> {
         installer::uninstall_modloader(
-            &self.http,
+            self.downloader.as_ref(),
             &self.root,
             vanilla_dir,
             loader,
             &self.mirror,
             self.concurrency,
+            self.reporter.as_ref(),
         )
         .await
     }
 }
 
 /// Builder for [`MdtClient`].
-#[derive(Debug)]
 pub struct MdtClientBuilder {
     mirror: Mirror,
     root: PathBuf,
     concurrency: usize,
+    reporter: Option<Arc<dyn ProgressReporter>>,
+    downloader: Option<Arc<dyn Downloader>>,
 }
 
 impl MdtClientBuilder {
@@ -277,6 +300,8 @@ impl MdtClientBuilder {
             mirror: Mirror::default(),
             root: PathBuf::from("."),
             concurrency: DEFAULT_CONCURRENCY,
+            reporter: None,
+            downloader: None,
         }
     }
 
@@ -301,15 +326,40 @@ impl MdtClientBuilder {
         self
     }
 
+    /// Override the progress/status reporter (default: [`StderrReporter`]).
+    ///
+    /// Implement [`ProgressReporter`] to send MDT's `Downloading`/`Downloaded`/`Updating` events to
+    /// your own logger, TUI, or a silent sink.
+    #[must_use]
+    pub fn progress_reporter(mut self, reporter: impl ProgressReporter + 'static) -> Self {
+        self.reporter = Some(Arc::new(reporter));
+        self
+    }
+
+    /// Override the transport (default: [`HttpDownloader`] over the shared HTTP client).
+    ///
+    /// Implement [`Downloader`] to serve downloads from a custom source — a caching proxy, an
+    /// in-memory store, an alternate protocol — for full low-level control.
+    #[must_use]
+    pub fn downloader(mut self, downloader: impl Downloader + 'static) -> Self {
+        self.downloader = Some(Arc::new(downloader));
+        self
+    }
+
     /// Finish building: creates the root directory and the shared HTTP client.
     pub fn build(self) -> Result<MdtClient, MdtError> {
         std::fs::create_dir_all(&self.root)?;
         let http = http::build_client()?;
+        let downloader = self
+            .downloader
+            .unwrap_or_else(|| Arc::new(HttpDownloader::new(http.clone())));
         Ok(MdtClient {
             http,
+            downloader,
             mirror: self.mirror,
             root: self.root,
             concurrency: self.concurrency,
+            reporter: self.reporter.unwrap_or_else(|| Arc::new(StderrReporter::new())),
         })
     }
 }

@@ -4,6 +4,7 @@
 //! `--tweakClass`. MDT downloads the core JAR and its dependencies, then synthesizes the version
 //! JSON — no Java required.
 
+use crate::customize::Downloader;
 use crate::error::MdtError;
 use crate::mirror::Mirror;
 use crate::modloader::ModLoader;
@@ -17,7 +18,7 @@ use super::{
 };
 
 pub async fn install(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     req: InstallRequest,
 ) -> Result<InstalledVersion, MdtError> {
     let urls = ManifestUrls::try_new(&req.mirror)?;
@@ -35,33 +36,37 @@ pub async fn install(
     let official = format!("{}/{}", ManifestUrls::try_new(&Mirror::Mojang)?.liteloader_base, file);
     let candidates = dedup_urls(&[mirrored.clone(), official]);
     if !cached.exists() {
-        download_to_file_from_candidates(http, &candidates, &cached).await?;
+        download_to_file_from_candidates(downloader, &candidates, &cached).await?;
     }
     if let Some(parent) = liteloader_dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::copy(&cached, &liteloader_dest).await?;
-    eprintln!("Downloaded liteloader-{}.jar by LiteLoader {}", req.loader_version, req.loader_version);
+    req.reporter
+        .status(&format!("Downloaded liteloader-{}.jar by LiteLoader {}", req.loader_version, req.loader_version));
 
     // 2. Download LaunchWrapper and ASM (required at runtime).
+    let reporter = req.reporter.as_ref();
     download_library(
-        http,
+        downloader,
         "net.minecraft:launchwrapper:1.12",
         "https://libraries.minecraft.net/",
         &req.root_dir,
         &req.mirror,
         &urls,
+        reporter,
         None,
         Some(&reg_dir),
     )
     .await?;
     download_library(
-        http,
+        downloader,
         "org.ow2.asm:asm-all:5.2",
         "https://libraries.minecraft.net/",
         &req.root_dir,
         &req.mirror,
         &urls,
+        reporter,
         None,
         Some(&reg_dir),
     )

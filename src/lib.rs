@@ -75,6 +75,7 @@
 //! paths, download tasks, and loader installs.
 
 mod client;
+mod customize;
 mod error;
 mod http;
 mod macros;
@@ -97,6 +98,7 @@ pub mod tui;
 
 pub use asset::AssetRegistry;
 pub use client::{MdtClient, MdtClientBuilder};
+pub use customize::{Downloader, FsRegistryCache, HttpDownloader, ProgressReporter, RegistryCache, StderrReporter};
 pub use downloader::{AssetIndex, AssetObject, DownloadTask, VersionJson};
 pub use error::MdtError;
 pub use installer::{InstallMethod, InstallRequest, InstalledVersion};

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use sha1::{Digest, Sha1};
 
+use crate::customize::{Downloader, ProgressReporter};
 use crate::downloader::{self, AssetIndex, AssetIndexInfo, AssetObject, DownloadTask};
 use crate::error::MdtError;
 use crate::mirror::Mirror;
@@ -40,9 +41,10 @@ impl AssetRegistry {
         root: &Path,
         asset_index: &AssetIndexInfo,
         minecraft_version: &str,
-        http: &reqwest::Client,
+        downloader: &dyn Downloader,
         mirror: &Mirror,
         urls: &ManifestUrls,
+        reporter: &dyn ProgressReporter,
     ) -> Result<(), MdtError> {
         let local_index = root
             .join("assets")
@@ -51,13 +53,13 @@ impl AssetRegistry {
 
         // 1. Ensure the index JSON is on disk, via the global index cache.
         let cache_dir = registry::index_cache_dir(registry::VANILLA_SOURCE);
-        fetch_index_file(asset_index, &local_index, &cache_dir, http, mirror, urls).await?;
+        fetch_index_file(asset_index, &local_index, &cache_dir, downloader, mirror, urls, reporter).await?;
 
         // 2. Parse the index and sync its assets.
         let content = tokio::fs::read_to_string(&local_index).await?;
         let index: AssetIndex = serde_json::from_str(&content)?;
         AssetRegistry::new(index, root, minecraft_version)
-            .sync(http, mirror, urls)
+            .sync(downloader, mirror, urls, reporter)
             .await
     }
 
@@ -147,9 +149,10 @@ impl AssetRegistry {
     /// did download is still copied into place first.
     pub async fn sync(
         &self,
-        http: &reqwest::Client,
+        downloader: &dyn Downloader,
         mirror: &Mirror,
         urls: &ManifestUrls,
+        reporter: &dyn ProgressReporter,
     ) -> Result<(), MdtError> {
         let needed = self.missing_locally().await?;
         if needed.is_empty() {
@@ -167,7 +170,7 @@ impl AssetRegistry {
             Ok(())
         } else {
             let tasks = downloader::build_tasks_from_assets(&to_download, &self.registry_dir);
-            downloader::execute_downloads(http, tasks, ASSET_CONCURRENCY, mirror, urls).await
+            downloader::execute_downloads(downloader, tasks, ASSET_CONCURRENCY, mirror, urls, reporter).await
         };
 
         // Copy everything now present (and verified) in the registry into the local objects dir.
@@ -209,9 +212,10 @@ async fn fetch_index_file(
     asset_index: &AssetIndexInfo,
     local_index: &Path,
     cache_dir: &Path,
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     mirror: &Mirror,
     urls: &ManifestUrls,
+    reporter: &dyn ProgressReporter,
 ) -> Result<(), MdtError> {
     let cache_path = cache_dir.join(&asset_index.sha1);
 
@@ -230,7 +234,7 @@ async fn fetch_index_file(
         label: Some(format!("{}.json", asset_index.id)),
         by: None,
     };
-    downloader::execute_downloads(http, vec![task], 1, mirror, urls).await?;
+    downloader::execute_downloads(downloader, vec![task], 1, mirror, urls, reporter).await?;
     copy_file(&cache_path, local_index).await
 }
 
@@ -278,6 +282,7 @@ fn sha1_of_file(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::customize::{HttpDownloader, StderrReporter};
     use sha1::{Digest, Sha1};
     use std::sync::atomic::{AtomicU64, Ordering};
     use wiremock::matchers::{method, path};
@@ -290,8 +295,8 @@ mod tests {
         std::env::temp_dir().join(format!("mdt-asset-{tag}-{}-{n}", std::process::id()))
     }
 
-    fn test_client() -> reqwest::Client {
-        reqwest::Client::builder().no_proxy().build().unwrap()
+    fn test_client() -> HttpDownloader {
+        HttpDownloader::new(reqwest::Client::builder().no_proxy().build().unwrap())
     }
 
     fn object(content: &[u8]) -> AssetObject {
@@ -372,10 +377,10 @@ mod tests {
 
         // `sync` should find it in the registry and copy it into the local objects dir, with no
         // network activity at all.
-        let http = reqwest::Client::new();
+        let http = HttpDownloader::new(reqwest::Client::new());
         let mirror = Mirror::Mojang;
         let urls = ManifestUrls::try_new(&mirror).unwrap();
-        reg.sync(&http, &mirror, &urls).await.unwrap();
+        reg.sync(&http, &mirror, &urls, &StderrReporter::default()).await.unwrap();
 
         let local = object_path(&root.join("assets").join("objects"), &obj.hash);
         assert_eq!(std::fs::read(&local).unwrap(), content);
@@ -402,10 +407,10 @@ mod tests {
         std::fs::write(cache_dir.join(&asset_index.sha1), &content).unwrap();
 
         // Warm from cache; the unreachable URL must never be contacted.
-        let http = reqwest::Client::new();
+        let http = HttpDownloader::new(reqwest::Client::new());
         let mirror = Mirror::Mojang;
         let urls = ManifestUrls::try_new(&mirror).unwrap();
-        fetch_index_file(&asset_index, &local_index, &cache_dir, &http, &mirror, &urls)
+        fetch_index_file(&asset_index, &local_index, &cache_dir, &http, &mirror, &urls, &StderrReporter::default())
             .await
             .unwrap();
 
@@ -440,7 +445,7 @@ mod tests {
         let http = test_client();
         let mirror = Mirror::Mojang;
         let urls = ManifestUrls::try_new(&mirror).unwrap();
-        fetch_index_file(&asset_index, &local_index, &cache_dir, &http, &mirror, &urls)
+        fetch_index_file(&asset_index, &local_index, &cache_dir, &http, &mirror, &urls, &StderrReporter::default())
             .await
             .unwrap();
 

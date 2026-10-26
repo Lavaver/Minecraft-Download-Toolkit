@@ -4,10 +4,10 @@
 //! `libraries/`, then hand-write the Minecraft version JSON.
 
 use std::path::Path;
-use std::time::Duration;
 
 use serde::Serialize;
 
+use crate::customize::{Downloader, ProgressReporter};
 use crate::error::MdtError;
 use crate::mirror::Mirror;
 use crate::modloader::ModLoader;
@@ -139,12 +139,13 @@ pub fn apply_mirror_to_json(
 /// *copied* into `libraries/`, so re-installing the same loader never re-downloads. The cache is
 /// checksum-verified (authoritative Maven `.sha1`/`.sha256`/`.md5`, then persisted for offline use).
 pub async fn download_library(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     name: &str,
     base_url: &str,
     root: &Path,
     mirror: &Mirror,
     urls: &ManifestUrls,
+    reporter: &dyn ProgressReporter,
     by: Option<&str>,
     registry_dir: Option<&Path>,
 ) -> Result<(), MdtError> {
@@ -157,11 +158,11 @@ pub async fn download_library(
     let upstream = format!("{}/{}", base_url.trim_end_matches('/'), rel);
     eprintln!("[mdt] download_library: {name} from {upstream}");
 
-    download_artifact_verified(http, &upstream, &dest, mirror, urls, registry_dir, &rel).await?;
+    download_artifact_verified(downloader, &upstream, &dest, mirror, urls, registry_dir, &rel).await?;
 
     if let Some(by) = by {
         let file_name = rel.rsplit('/').next().unwrap_or(rel.as_str());
-        eprintln!("Downloaded {file_name} by {by}");
+        reporter.status(&format!("Downloaded {file_name} by {by}"));
     }
     Ok(())
 }
@@ -169,23 +170,13 @@ pub async fn download_library(
 /// Fetch a loader profile JSON, trying each candidate URL in order and returning the first success
 /// together with the URL that served it.
 async fn fetch_profile_json(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     candidates: &[String],
 ) -> Result<(String, String), MdtError> {
     let mut last_err = None;
     for url in candidates {
         eprintln!("[mdt] install_from_profile: fetching {url}");
-        let result = async {
-            let resp = http
-                .get(url)
-                .timeout(Duration::from_secs(15))
-                .send()
-                .await?
-                .error_for_status()?;
-            Ok::<_, MdtError>(resp.text().await?)
-        }
-        .await;
-        match result {
+        match downloader.fetch(url).await {
             Ok(text) => {
                 eprintln!("[mdt] install_from_profile: profile body read ({} bytes)", text.len());
                 return Ok((text, url.clone()));
@@ -206,12 +197,12 @@ async fn fetch_profile_json(
 /// `profile_urls` is ordered mirror-first, official-last; the first URL that returns a parseable
 /// profile wins, so a stalled mirror falls through to the official source.
 pub async fn install_from_profile(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     profile_urls: &[String],
     req: &InstallRequest,
     urls: &ManifestUrls,
 ) -> Result<InstalledVersion, MdtError> {
-    let (text, used_url) = fetch_profile_json(http, profile_urls).await?;
+    let (text, used_url) = fetch_profile_json(downloader, profile_urls).await?;
     let mut profile: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
         MdtError::JsonParseError(e).context(format!("parsing loader profile {used_url}"))
     })?;
@@ -240,7 +231,7 @@ pub async fn install_from_profile(
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .ok_or_else(|| MdtError::InvalidManifest("loader profile library is missing `url`".to_string()))?;
-        download_library(http, name, base, &req.root_dir, &req.mirror, urls, Some(&by), Some(&reg_dir)).await?;
+        download_library(downloader, name, base, &req.root_dir, &req.mirror, urls, req.reporter.as_ref(), Some(&by), Some(&reg_dir)).await?;
     }
 
     let profile = apply_mirror_to_json(profile, &req.mirror, urls);
@@ -259,7 +250,7 @@ pub async fn install_from_profile(
 
 /// Method B for legacy Forge (1.12.2 and earlier): unpack the installer and deploy `maven/`.
 pub async fn install_legacy_forge(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     installer_url: &str,
     root: &Path,
     mirror: &Mirror,
@@ -272,7 +263,7 @@ pub async fn install_legacy_forge(
     ensure_empty_dir(&temp).await?;
 
     let installer_jar = temp.join("installer.jar");
-    download_maven_fallback(http, installer_url, &installer_jar, mirror, urls).await?;
+    download_maven_fallback(downloader, installer_url, &installer_jar, mirror, urls).await?;
 
     let unpack = temp.join("unpack");
     unzip_jar(&installer_jar, &unpack).await?;
@@ -337,6 +328,7 @@ pub async fn read_vanilla_launch_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::customize::{HttpDownloader, StderrReporter};
     use sha1::{Digest, Sha1};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -350,8 +342,8 @@ mod tests {
         std::env::temp_dir().join(format!("mdt-vjson-{tag}-{}-{n}", std::process::id()))
     }
 
-    fn test_client() -> reqwest::Client {
-        reqwest::Client::builder().no_proxy().build().unwrap()
+    fn test_client() -> HttpDownloader {
+        HttpDownloader::new(reqwest::Client::builder().no_proxy().build().unwrap())
     }
 
     #[tokio::test]
@@ -369,7 +361,7 @@ mod tests {
         std::fs::write(&cached, content).unwrap();
         std::fs::write(format!("{}.checksum", cached.display()), format!("{hash}\n")).unwrap();
 
-        let http = reqwest::Client::new();
+        let http = HttpDownloader::new(reqwest::Client::new());
         let mirror = Mirror::Mojang;
         let urls = ManifestUrls::try_new(&mirror).unwrap();
 
@@ -381,6 +373,7 @@ mod tests {
             &root,
             &mirror,
             &urls,
+            &StderrReporter::default(),
             None,
             Some(&reg_dir),
         )
@@ -408,7 +401,7 @@ mod tests {
         std::fs::write(&cached, b"tampered").unwrap();
         std::fs::write(format!("{}.checksum", cached.display()), format!("{good_hash}\n")).unwrap();
 
-        let http = reqwest::Client::new();
+        let http = HttpDownloader::new(reqwest::Client::new());
         let mirror = Mirror::Mojang;
         let urls = ManifestUrls::try_new(&mirror).unwrap();
 
@@ -421,6 +414,7 @@ mod tests {
             &root,
             &mirror,
             &urls,
+            &StderrReporter::default(),
             None,
             Some(&reg_dir),
         )
@@ -463,6 +457,7 @@ mod tests {
             &root,
             &mirror,
             &urls,
+            &StderrReporter::default(),
             None,
             Some(&reg_dir),
         )
@@ -510,6 +505,7 @@ mod tests {
             &root,
             &mirror,
             &urls,
+            &StderrReporter::default(),
             None,
             Some(&reg_dir),
         )

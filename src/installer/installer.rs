@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use crate::customize::Downloader;
 use crate::error::MdtError;
 use crate::mirror::Mirror;
 use crate::urls::ManifestUrls;
@@ -17,7 +18,7 @@ use super::{detect_java, download_artifact_verified, ensure_empty_dir};
 /// The installer JAR is checksum-verified and cached under `registry_dir` (keyed by `rel_path`,
 /// its Maven-relative path) so re-installing the same loader never re-downloads it.
 pub async fn install_via_official_installer(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     installer_url: &str,
     root_dir: &Path,
     mirror: &Mirror,
@@ -29,7 +30,7 @@ pub async fn install_via_official_installer(
     ensure_empty_dir(&temp_dir).await?;
 
     let installer_jar = temp_dir.join("installer.jar");
-    download_artifact_verified(http, installer_url, &installer_jar, mirror, urls, registry_dir, rel_path)
+    download_artifact_verified(downloader, installer_url, &installer_jar, mirror, urls, registry_dir, rel_path)
         .await?;
 
     let java = detect_java().await?;

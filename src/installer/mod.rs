@@ -25,13 +25,12 @@ mod version_json;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use futures::StreamExt;
 use md5::Md5;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 
+use crate::customize::{Downloader, ProgressReporter};
 use crate::error::MdtError;
 use crate::mirror::Mirror;
 use crate::modloader::ModLoader;
@@ -66,7 +65,7 @@ impl std::fmt::Display for InstallMethod {
 }
 
 /// A complete mod-loader installation request.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct InstallRequest {
     /// Target vanilla Minecraft version, e.g. `1.20.1`.
     pub mc_version: String,
@@ -81,6 +80,8 @@ pub struct InstallRequest {
     /// In-place install target. When set, the loader JSON is written into this directory instead
     /// of the isolated `versions/<id>` directory (`copy_vanilla == false`).
     pub target_dir: Option<PathBuf>,
+    /// Progress/status reporter for this install.
+    pub reporter: std::sync::Arc<dyn ProgressReporter>,
 }
 
 /// The result of installing a mod loader.
@@ -98,7 +99,7 @@ pub struct InstalledVersion {
 
 /// Install a mod loader, dispatching to the per-loader implementation.
 pub async fn install_modloader(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     req: InstallRequest,
 ) -> Result<InstalledVersion, MdtError> {
     eprintln!(
@@ -108,11 +109,11 @@ pub async fn install_modloader(
         req.loader_version
     );
     let result = match req.loader {
-        ModLoader::Forge => forge::install(http, req).await,
-        ModLoader::Neoforge => neoforge::install(http, req).await,
-        ModLoader::Fabric => fabric::install(http, req).await,
-        ModLoader::Quilt => quilt::install(http, req).await,
-        ModLoader::Liteloader => liteloader::install(http, req).await,
+        ModLoader::Forge => forge::install(downloader, req).await,
+        ModLoader::Neoforge => neoforge::install(downloader, req).await,
+        ModLoader::Fabric => fabric::install(downloader, req).await,
+        ModLoader::Quilt => quilt::install(downloader, req).await,
+        ModLoader::Liteloader => liteloader::install(downloader, req).await,
     };
     eprintln!("[mdt] install_modloader: dispatch finished");
     result
@@ -201,25 +202,12 @@ pub async fn detect_java() -> Result<PathBuf, MdtError> {
 
 /// Stream a URL to a file without checksum verification (for loader installer JARs).
 pub async fn download_to_file(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     url: &str,
     dest: &Path,
 ) -> Result<(), MdtError> {
     eprintln!("[mdt] download_to_file: {url} -> {}", dest.display());
-    if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let resp = http.get(url).send().await?.error_for_status()?;
-    eprintln!("[mdt] download_to_file: response received, streaming body");
-    let mut file = tokio::fs::File::create(dest).await?;
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await?;
-    }
-    tokio::io::AsyncWriteExt::flush(&mut file).await?;
-    eprintln!("[mdt] download_to_file: done {}", dest.display());
-    Ok(())
+    downloader.download(url, dest).await
 }
 
 /// Deduplicate a list of URL candidates, preserving order and dropping empty entries.
@@ -237,7 +225,7 @@ pub fn dedup_urls(candidates: &[String]) -> Vec<String> {
 /// as a fallback. This is the mirror-first, official-as-backup policy applied to every loader
 /// download, so a stalled or 403ing mirror can never hang or kill the install.
 pub async fn download_maven_fallback(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     upstream_url: &str,
     dest: &Path,
     mirror: &Mirror,
@@ -245,19 +233,19 @@ pub async fn download_maven_fallback(
 ) -> Result<(), MdtError> {
     let mirrored = urls.apply_maven_mirror(upstream_url, mirror);
     let candidates = dedup_urls(&[mirrored, upstream_url.to_string()]);
-    download_to_file_from_candidates(http, &candidates, dest).await
+    download_to_file_from_candidates(downloader, &candidates, dest).await
 }
 
 /// Download `dest` from the first candidate URL that succeeds, removing any partial file between
 /// attempts.
 pub async fn download_to_file_from_candidates(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     candidates: &[String],
     dest: &Path,
 ) -> Result<(), MdtError> {
     let mut last_err = None;
     for url in candidates {
-        match download_to_file(http, url, dest).await {
+        match download_to_file(downloader, url, dest).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 eprintln!("[mdt] download_to_file: {url} failed, trying next: {e}");
@@ -286,7 +274,7 @@ pub async fn copy_file(src: &Path, dst: &Path) -> Result<(), MdtError> {
 /// `.checksum` sidecar; warm hits are verified offline and copied into `dest`. Otherwise the file
 /// is downloaded straight into `dest` (still verified when a Maven checksum sidecar is reachable).
 pub async fn download_artifact_verified(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     upstream_url: &str,
     dest: &Path,
     mirror: &Mirror,
@@ -308,13 +296,13 @@ pub async fn download_artifact_verified(
             let _ = tokio::fs::remove_file(&cached_checksum).await;
 
             // Download, verifying against the authoritative Maven checksum when reachable.
-            let authoritative = fetch_checksum(http, upstream_url, mirror, urls).await;
+            let authoritative = fetch_checksum(downloader, upstream_url, mirror, urls).await;
             match &authoritative {
                 Some(expected) => {
-                    download_verified(http, upstream_url, &cached, expected, mirror, urls).await?;
+                    download_verified(downloader, upstream_url, &cached, expected, mirror, urls).await?;
                 }
                 None => {
-                    download_maven_fallback(http, upstream_url, &cached, mirror, urls).await?;
+                    download_maven_fallback(downloader, upstream_url, &cached, mirror, urls).await?;
                 }
             }
 
@@ -325,16 +313,16 @@ pub async fn download_artifact_verified(
             }
             copy_file(&cached, dest).await
         }
-        None => match fetch_checksum(http, upstream_url, mirror, urls).await {
-            Some(expected) => download_verified(http, upstream_url, dest, &expected, mirror, urls).await,
-            None => download_maven_fallback(http, upstream_url, dest, mirror, urls).await,
+        None => match fetch_checksum(downloader, upstream_url, mirror, urls).await {
+            Some(expected) => download_verified(downloader, upstream_url, dest, &expected, mirror, urls).await,
+            None => download_maven_fallback(downloader, upstream_url, dest, mirror, urls).await,
         },
     }
 }
 
 /// Fetch a Maven checksum sidecar (`.sha1`, then `.sha256`, then `.md5`), mirror-first.
 async fn fetch_checksum(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     artifact_url: &str,
     mirror: &Mirror,
     urls: &ManifestUrls,
@@ -343,17 +331,13 @@ async fn fetch_checksum(
         let sidecar = format!("{artifact_url}.{suffix}");
         let mirrored = urls.apply_maven_mirror(&sidecar, mirror);
         for url in dedup_urls(&[mirrored, sidecar]) {
-            let resp = match http.get(&url).timeout(Duration::from_secs(15)).send().await {
-                Ok(r) => r,
+            let text = match downloader.fetch(&url).await {
+                Ok(t) => t,
                 Err(_) => continue,
             };
-            if let Ok(resp) = resp.error_for_status() {
-                if let Ok(text) = resp.text().await {
-                    let hash = text.trim().to_string();
-                    if ChecksumAlgo::from_hash(&hash).is_some() {
-                        return Some(hash);
-                    }
-                }
+            let hash = text.trim().to_string();
+            if ChecksumAlgo::from_hash(&hash).is_some() {
+                return Some(hash);
             }
         }
     }
@@ -362,7 +346,7 @@ async fn fetch_checksum(
 
 /// Download `url` to `dest` and verify its checksum against `expected` before moving it into place.
 async fn download_verified(
-    http: &reqwest::Client,
+    downloader: &dyn Downloader,
     url: &str,
     dest: &Path,
     expected: &str,
@@ -371,7 +355,7 @@ async fn download_verified(
 ) -> Result<(), MdtError> {
     let tmp = PathBuf::from(format!("{}.mdt-download", dest.display()));
     let result = async {
-        download_maven_fallback(http, url, &tmp, mirror, urls).await?;
+        download_maven_fallback(downloader, url, &tmp, mirror, urls).await?;
         let actual = compute_hash_for(&tmp, ChecksumAlgo::from_hash(expected));
         if actual.as_deref() != Some(expected) {
             return Err(MdtError::ChecksumMismatch {
