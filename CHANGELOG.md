@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.2] | The minimum compatible version of Rust has been determined
+
+> [!NOTE]
+> This update only lowers the minimum required version of the Rust toolchain; there are no breaking changes to the API contracts, so please rest assured.
+
+After careful consideration and observation of the editions commonly used within the Rust community, we have decided to lower MDT’s minimum compatible Rust version to 1.85.0 (Rust 2021 Edition) to make it easier for more projects and developers to adopt this toolkit.
+
+At the same time, the [macro library](https://crates.io/crates/mdt-macros) will be updated to version v0.4.1 in conjunction with this lowering of the minimum Rust version requirement. We sincerely apologize for any inconvenience this may cause.
+
 ## [0.6.1] | Routine Feature Updates
 
 - **Customization traits** — a set of public extension traits (`ProgressReporter`, `Downloader`,

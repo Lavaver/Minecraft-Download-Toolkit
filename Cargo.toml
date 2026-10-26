@@ -3,12 +3,13 @@ members = ["mdt-macros"]
 
 [package]
 name = "mdt-minecraft"
-version = "0.6.1"
-edition = "2024"
+version = "0.6.2"
+edition = "2021"
+rust-version = "1.85.0"
 description = "Minecraft Download Toolkit - an ergonomic, low-level library for downloading and installing Minecraft versions and mod loaders."
 license = "MIT"
-repository = "https://github.com/Lavaver/MDT"
-homepage = "https://github.com/Lavaver/MDT"
+repository = "https://github.com/Lavaver/Minecraft-Download-Toolkit"
+homepage = "https://github.com/Lavaver/Minecraft-Download-Toolkit"
 documentation = "https://docs.rs/mdt-minecraft"
 keywords = ["minecraft", "launcher", "downloader", "modloader", "forge"]
 categories = ["game-development", "api-bindings"]
