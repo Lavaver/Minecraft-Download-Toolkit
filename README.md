@@ -12,6 +12,8 @@ MDT is a small library that fills a `.minecraft` folder for you — vanilla vers
 loaders, libraries, assets. It's the plumbing a launcher sits on top of: no UI, no progress
 bars, no prompts. You call a function, you get a `Result`.
 
+We've handled a lot of the behind-the-scenes work for you, hiding many of the implementation details that you would otherwise have to painstakingly parse from the Minecraft Wiki. All you need to do is call the default API to start playing, or customize your own implementation to tailor your experience before the game begins.
+
 ## Features
 
 - Vanilla Minecraft, plus Forge, Fabric, Quilt, NeoForge, and LiteLoader.
@@ -171,6 +173,7 @@ mdt-minecraft = { version = "0.6.3", features = ["cli"] }            # + CLI and
 - [docs.rs/mdt-minecraft](https://docs.rs/mdt-minecraft)
 - [Mirror TOML format](docs/mirror_toml.md)
 - [Mirror URI spec](docs/mirror_uri.md)
+- [The “Game Files” section in the “Tutorial: Writing a Launcher” page on the Minecraft Wiki](https://zh.minecraft.wiki/w/Tutorial:%E7%BC%96%E5%86%99%E5%90%AF%E5%8A%A8%E5%99%A8?variant=zh-cn#%E6%B8%B8%E6%88%8F%E6%96%87%E4%BB%B6)
 
 ## Changelog
 

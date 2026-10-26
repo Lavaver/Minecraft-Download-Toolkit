@@ -10,6 +10,8 @@
 
 MDT 是一个帮你填满 `.minecraft` 目录的小库——原版版本、模组加载器、依赖库、资源文件。它是启动器底下的那层「管道」：没有界面、没有进度条、没有交互提示。你调一个函数，拿到一个 `Result`。
 
+我们帮你做了很多底层工作，隐藏了很多原本你需要在 Minecraft Wiki 当中仔细抠字眼的实现细节，你只需要调用默认实现的 API 即可开玩，或者自定义你的实现，在游戏开始前自定义你的体验
+
 ## 特性
 
 - 原版 Minecraft，外加 Forge、Fabric、Quilt、NeoForge 和 LiteLoader。
@@ -162,6 +164,7 @@ mdt-minecraft = { version = "0.6.3", features = ["cli"] }            # + CLI 和
 - [docs.rs/mdt-minecraft](https://docs.rs/mdt-minecraft)
 - [镜像 TOML 格式](docs/mirror_toml.md)
 - [镜像 URI 规范](docs/mirror_uri.md)
+- [Minecraft Wiki《教程:编写启动器》当中的《游戏文件》一节](https://zh.minecraft.wiki/w/Tutorial:%E7%BC%96%E5%86%99%E5%90%AF%E5%8A%A8%E5%99%A8?variant=zh-cn#%E6%B8%B8%E6%88%8F%E6%96%87%E4%BB%B6)
 
 ## 更新日志
 
