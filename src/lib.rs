@@ -89,6 +89,7 @@ pub mod mirror;
 pub mod modloader;
 pub mod registry;
 pub mod urls;
+pub mod virtual_dir;
 
 #[cfg(feature = "cli")]
 pub mod cli;
@@ -111,3 +112,4 @@ pub use mc_version::McVersion;
 pub use mirror::Mirror;
 pub use modloader::ModLoader;
 pub use urls::ManifestUrls;
+pub use virtual_dir::{mount_all, VirtualDir};

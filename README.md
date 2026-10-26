@@ -6,6 +6,8 @@ Download and install Minecraft versions and mod loaders from Rust.
 [![docs.rs](https://docs.rs/mdt-minecraft/badge.svg)](https://docs.rs/mdt-minecraft)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+**语言 / Language:** [English](README.md) · [简体中文](README.zh_CN.md)
+
 MDT is a small library that fills a `.minecraft` folder for you — vanilla versions, mod
 loaders, libraries, assets. It's the plumbing a launcher sits on top of: no UI, no progress
 bars, no prompts. You call a function, you get a `Result`.
@@ -24,7 +26,7 @@ bars, no prompts. You call a function, you get a `Result`.
 
 ```toml
 [dependencies]
-mdt-minecraft = "0.5.2"
+mdt-minecraft = "0.6.3"
 ```
 
 ## Quick start
@@ -60,6 +62,7 @@ client.install_modloader(&vanilla, ModLoader::Quilt, "0.24.0", false).await?;
 
 // Revert a loader back to vanilla.
 client.uninstall_modloader(&vanilla, ModLoader::Quilt).await?;
+```
 
 ## Isolation
 
@@ -158,9 +161,9 @@ Under the hood `full_install!(client, "1.20.1", loader, "ver")` expands to
 The core library has no terminal dependencies by default:
 
 ```toml
-mdt-minecraft = "0.5.2"                                              # library only
-mdt-minecraft = { version = "0.5.2", features = ["tui"] }            # + TUI
-mdt-minecraft = { version = "0.5.2", features = ["cli"] }            # + CLI and TUI
+mdt-minecraft = "0.6.3"                                              # library only
+mdt-minecraft = { version = "0.6.3", features = ["tui"] }            # + TUI
+mdt-minecraft = { version = "0.6.3", features = ["cli"] }            # + CLI and TUI
 ```
 
 ## Docs

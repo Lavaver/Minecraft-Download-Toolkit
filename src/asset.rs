@@ -17,6 +17,7 @@ use crate::error::MdtError;
 use crate::mirror::Mirror;
 use crate::registry;
 use crate::urls::ManifestUrls;
+use crate::virtual_dir::{mount_all, VirtualDir, DEFAULT_MOUNT_CONCURRENCY};
 
 /// Default concurrency for asset downloads. Assets are many and small, so this is much higher than
 /// the conservative default used for large files like the client JAR.
@@ -183,26 +184,22 @@ impl AssetRegistry {
         download_result
     }
 
-    /// Copy verified files from the global registry into the local objects dir (never hardlink).
+    /// Mount verified files from the global registry into the local objects dir using the cheapest
+    /// link available (hardlink > symlink > copy).
     async fn copy_to_local(&self, objects: &[AssetObject]) -> Result<(), MdtError> {
         if objects.is_empty() {
             return Ok(());
         }
-        let registry_dir = self.registry_dir.clone();
-        let objects_dir = self.objects_dir.clone();
-        let objects = objects.to_vec();
-        tokio::task::spawn_blocking(move || -> Result<(), MdtError> {
-            for object in &objects {
-                let src = object_path(&registry_dir, &object.hash);
-                let dst = object_path(&objects_dir, &object.hash);
-                if let Some(parent) = dst.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::copy(&src, &dst)?;
-            }
-            Ok(())
-        })
-        .await?
+        let mounts: Vec<VirtualDir> = objects
+            .iter()
+            .map(|object| {
+                VirtualDir::new(
+                    object_path(&self.registry_dir, &object.hash),
+                    object_path(&self.objects_dir, &object.hash),
+                )
+            })
+            .collect();
+        mount_all(mounts, DEFAULT_MOUNT_CONCURRENCY).await
     }
 }
 
@@ -221,10 +218,10 @@ async fn fetch_index_file(
 
     // Warm the local index from the global cache if it's already there (hash-verified).
     if sha1_of_file(&cache_path).is_some_and(|hash| hash == asset_index.sha1) {
-        return copy_file(&cache_path, local_index).await;
+        return VirtualDir::new(&cache_path, local_index).mount().await;
     }
 
-    // Download into the global cache (SHA-1 verified by the downloader), then copy into place.
+    // Download into the global cache (SHA-1 verified by the downloader), then mount into place.
     let task = DownloadTask {
         url: asset_index.url.clone(),
         dest_path: cache_path.clone(),
@@ -235,16 +232,7 @@ async fn fetch_index_file(
         by: None,
     };
     downloader::execute_downloads(downloader, vec![task], 1, mirror, urls, reporter).await?;
-    copy_file(&cache_path, local_index).await
-}
-
-/// Copy `src` to `dst`, creating parent directories. Never hardlinks.
-async fn copy_file(src: &Path, dst: &Path) -> Result<(), MdtError> {
-    if let Some(parent) = dst.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::copy(src, dst).await?;
-    Ok(())
+    VirtualDir::new(&cache_path, local_index).mount().await
 }
 
 /// The content-addressed path for an object hash: `<dir>/<prefix>/<hash>`.

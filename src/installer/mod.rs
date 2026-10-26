@@ -35,6 +35,7 @@ use crate::error::MdtError;
 use crate::mirror::Mirror;
 use crate::modloader::ModLoader;
 use crate::urls::ManifestUrls;
+use crate::virtual_dir::VirtualDir;
 
 pub use mcr::{
     build_manifest, find_removed_files, scan_manifest, verify_manifest, write_markers, ManifestFile,
@@ -259,13 +260,9 @@ pub async fn download_to_file_from_candidates(
     }))
 }
 
-/// Copy `src` to `dst`, creating parent directories (never hardlink).
+/// Mount `src` at `dst` using the cheapest link available (hardlink > symlink > copy).
 pub async fn copy_file(src: &Path, dst: &Path) -> Result<(), MdtError> {
-    if let Some(parent) = dst.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::copy(src, dst).await?;
-    Ok(())
+    VirtualDir::new(src, dst).mount().await
 }
 
 /// Download a Maven artifact with checksum verification and global-registry caching.

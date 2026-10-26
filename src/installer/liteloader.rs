@@ -10,6 +10,7 @@ use crate::mirror::Mirror;
 use crate::modloader::ModLoader;
 use crate::registry;
 use crate::urls::ManifestUrls;
+use crate::virtual_dir::VirtualDir;
 
 use super::version_json::{download_library, read_vanilla_launch_args, GeneratedLibrary, GeneratedVersionJson};
 use super::{
@@ -38,10 +39,7 @@ pub async fn install(
     if !cached.exists() {
         download_to_file_from_candidates(downloader, &candidates, &cached).await?;
     }
-    if let Some(parent) = liteloader_dest.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::copy(&cached, &liteloader_dest).await?;
+    VirtualDir::new(&cached, &liteloader_dest).mount().await?;
     req.reporter
         .status(&format!("Downloaded liteloader-{}.jar by LiteLoader {}", req.loader_version, req.loader_version));
 

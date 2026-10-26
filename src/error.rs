@@ -90,6 +90,10 @@ pub enum MdtError {
     /// Some downloads failed after exhausting retries; the remaining queue still completed.
     #[error("partial download failure: {0:?}")]
     PartialDownloadFailed(Vec<String>),
+
+    /// A virtual mount (hardlink / symlink / copy) failed to materialize a file.
+    #[error("virtual mount failed: {0}")]
+    VirtualDirMountFailed(String),
 }
 
 impl MdtError {

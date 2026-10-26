@@ -1,5 +1,7 @@
 # Mirror provider URI specification
 
+**语言 / Language:** [English](mirror_uri.md) · [简体中文](mirror_uri.zh_CN.md)
+
 Each provider supplies thirteen endpoints. Every field holds an absolute URL; MDT joins
 paths onto the `*_meta` / `*_maven` / `*_base` fields at call time and never appends
 paths to the manifest fields.

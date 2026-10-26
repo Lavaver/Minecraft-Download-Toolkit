@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.3] | Virtual directory mounting
+
+- **Virtual directory** — the global registry is now *mounted* into the local `.minecraft` layout
+  instead of physically copied. For every file MDT tries **hardlink → symlink → copy**, so same-volume
+  installs are instant and free, cross-volume installs use a symlink, and restricted filesystems
+  (FAT32, Windows without Developer Mode) fall back to a copy with a warning. `AssetRegistry`,
+  `download_library`, and the LiteLoader core JAR all mount through the new `mdt::VirtualDir`
+  (`mdt::virtual_dir::mount_all`), and `MdtError::VirtualDirMountFailed` reports mount failures.
+
 ## [0.6.2] | The minimum compatible version of Rust has been determined
 
 > [!NOTE]
