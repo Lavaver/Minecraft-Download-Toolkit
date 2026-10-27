@@ -3,7 +3,7 @@ members = ["mdt-macros"]
 
 [package]
 name = "mdt-minecraft"
-version = "0.6.4"
+version = "0.6.5"
 edition = "2021"
 rust-version = "1.85.0"
 description = "Minecraft Download Toolkit - an ergonomic, low-level library for downloading and installing Minecraft versions and mod loaders."

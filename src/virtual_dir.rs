@@ -10,8 +10,13 @@
 //!
 //! The registry content is never re-hashed here: hashes were already verified at download time, so
 //! mounting only sets up the link.
+//!
+//! Windows can transiently hold a file open (most often Windows Defender mid-scan), surfacing as a
+//! sharing violation (raw OS error 32) or access denied (error 5). [`mount_all`] treats those as a
+//! "Cargo-style" blocking wait: failed mounts are deferred to a polling queue and retried every
+//! [`POLL_INTERVAL`] for up to [`MAX_WAIT`]. A locked target is *never* deleted or truncated to get
+//! around the lock — it is simply left alone and retried later.
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -22,12 +27,14 @@ use crate::error::MdtError;
 /// Default concurrency for batch mounting. Bounded so we never exhaust file descriptors.
 pub const DEFAULT_MOUNT_CONCURRENCY: usize = 32;
 
-/// How many times to retry a mount operation that keeps hitting a transient file lock
-/// (Windows sharing violation, error 32).
-const MAX_LOCK_RETRIES: usize = 3;
+/// How long to wait between polls of the deferred file-lock queue.
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Delay between file-lock retries.
-const RETRY_BACKOFF: Duration = Duration::from_millis(50);
+/// Maximum total time to keep waiting for a file lock before giving up.
+const MAX_WAIT: Duration = Duration::from_secs(30);
+
+/// How many blocked file names to print in a "blocking wait" log line (the rest are elided).
+const MAX_NAMES_SHOWN: usize = 3;
 
 /// A single virtual mount: `source` (global registry) -> `target` (local `.minecraft`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,48 +66,125 @@ impl VirtualDir {
     }
 
     /// Materialize `target` from `source` using hardlink → symlink → copy.
+    ///
+    /// Unlike [`mount_all`], this performs a single attempt with no deferred retry: a transient
+    /// file lock surfaces as [`MdtError::VirtualDirMountFailed`] immediately.
     pub async fn mount(&self) -> Result<(), MdtError> {
-        mount_file(&self.source, &self.target).await
+        match mount_file(&self.source, &self.target).await {
+            MountAttempt::Mounted => Ok(()),
+            MountAttempt::Locked => Err(MdtError::VirtualDirMountFailed(format!(
+                "file is locked by another process: {}",
+                self.target.display()
+            ))),
+            MountAttempt::Failed(e) => Err(e),
+        }
     }
+}
+
+/// The result of a single [`mount_file`] attempt.
+enum MountAttempt {
+    /// The target is now materialized.
+    Mounted,
+    /// A transient file lock blocked progress; retry this mount later.
+    Locked,
+    /// A permanent, non-lock failure; report it immediately.
+    Failed(MdtError),
 }
 
 /// Mount a batch of files concurrently (bounded by `concurrency`).
+///
+/// Files that hit a transient Windows file lock are deferred to a polling queue: we log a
+/// Cargo-style `Blocking waiting for file lock on: ...` line, sleep [`POLL_INTERVAL`], and retry,
+/// for up to [`MAX_WAIT`]. Non-lock failures abort immediately.
 pub async fn mount_all(mounts: Vec<VirtualDir>, concurrency: usize) -> Result<(), MdtError> {
     let concurrency = concurrency.max(1);
-    let results = stream::iter(mounts.into_iter().map(|mount| async move {
-        mount.mount().await
-    }))
-    .buffer_unordered(concurrency)
-    .collect::<Vec<_>>()
-    .await;
+    let mut pending = mounts;
+    let mut elapsed = Duration::ZERO;
 
-    for result in results {
-        result?;
+    while !pending.is_empty() {
+        // 1. Attempt every pending mount concurrently; keep the mount alongside its outcome so a
+        //    failed one can be re-queued.
+        let outcomes = stream::iter(pending.drain(..).map(|mount| async move {
+            let outcome = mount_file(mount.source(), mount.target()).await;
+            (mount, outcome)
+        }))
+        .buffer_unordered(concurrency)
+        .collect::<Vec<_>>()
+        .await;
+
+        // 2. Separate successes from transient lock failures. A permanent failure aborts now.
+        let mut locked = Vec::new();
+        for (mount, outcome) in outcomes {
+            match outcome {
+                MountAttempt::Mounted => {}
+                MountAttempt::Locked => locked.push(mount),
+                MountAttempt::Failed(e) => return Err(e),
+            }
+        }
+
+        // 3. Everything mounted.
+        if locked.is_empty() {
+            return Ok(());
+        }
+
+        // 4. Out of patience.
+        if elapsed >= MAX_WAIT {
+            return Err(MdtError::VirtualDirMountFailed(format!(
+                "timed out after {}s waiting for file lock on: {}",
+                MAX_WAIT.as_secs(),
+                blocked_names(&locked)
+            )));
+        }
+
+        // 5. Cargo-style blocking message, then wait and retry only the files still locked.
+        eprintln!(
+            "[mdt] Blocking waiting for file lock on: {} ({} file{}, retrying in {}s...)",
+            blocked_names(&locked),
+            locked.len(),
+            if locked.len() == 1 { "" } else { "s" },
+            POLL_INTERVAL.as_secs(),
+        );
+
+        tokio::time::sleep(POLL_INTERVAL).await;
+        elapsed += POLL_INTERVAL;
+        pending = locked;
     }
+
     Ok(())
 }
 
-/// Mount `source` at `target`, preferring the cheapest link strategy.
-async fn mount_file(source: &Path, target: &Path) -> Result<(), MdtError> {
+/// Try to mount `source` at `target` once, preferring the cheapest link strategy.
+///
+/// Returns [`MountAttempt::Locked`] rather than a hard error when a transient Windows file lock
+/// blocks progress, so [`mount_all`] can defer it to a polling queue. A locked target is left
+/// untouched and reported for a later attempt — we never delete into a lock.
+async fn mount_file(source: &Path, target: &Path) -> MountAttempt {
     // The target's parent directory must exist before we link into it.
     if let Some(parent) = target.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            return MountAttempt::Failed(MdtError::VirtualDirMountFailed(format!(
+                "cannot create parent directory {}: {e}",
+                parent.display()
+            )));
+        }
     }
 
     // A symlink already pointing at the source is done — leave it alone (idempotent re-mount).
     if let Ok(link) = tokio::fs::read_link(target).await {
         if link == source {
-            return Ok(());
+            return MountAttempt::Mounted;
         }
     }
 
-    // Replace any stale target (a physical file, a wrong symlink, or a broken symlink). Removing a
-    // hardlink/symlink never touches the registry source. Retry on transient Windows file locks.
-    match retry_io(|| tokio::fs::remove_file(target)).await {
+    // Replace a stale target (a physical file, a wrong symlink, or a broken symlink). Removing a
+    // hardlink/symlink never touches the registry source. A locked target is left in place for a
+    // later attempt instead of being deleted.
+    match tokio::fs::remove_file(target).await {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) if is_lock_error(&e) => return MountAttempt::Locked,
         Err(e) => {
-            return Err(MdtError::VirtualDirMountFailed(format!(
+            return MountAttempt::Failed(MdtError::VirtualDirMountFailed(format!(
                 "cannot replace existing target {}: {e}",
                 target.display()
             )));
@@ -108,51 +192,58 @@ async fn mount_file(source: &Path, target: &Path) -> Result<(), MdtError> {
     }
 
     // 1. Hardlink — instant, zero extra space; only works within one volume.
-    if retry_io(|| tokio::fs::hard_link(source, target)).await.is_ok() {
-        return Ok(());
+    match tokio::fs::hard_link(source, target).await {
+        Ok(()) => return MountAttempt::Mounted,
+        Err(e) if is_lock_error(&e) => return MountAttempt::Locked,
+        Err(_) => {} // fall through to the next strategy
     }
 
     // 2. Symlink — works cross-volume on Unix, needs privileges on Windows.
-    if retry_io(|| symlink_file(source, target)).await.is_ok() {
-        return Ok(());
+    match symlink_file(source, target).await {
+        Ok(()) => return MountAttempt::Mounted,
+        Err(e) if is_lock_error(&e) => return MountAttempt::Locked,
+        Err(_) => {} // fall through to copy
     }
 
-    // 3. Fallback to a physical copy (cross-drive Windows, FAT32, or no symlink rights).
+    // 3. Physical copy — cross-drive Windows, FAT32, or no symlink rights.
     eprintln!(
         "[mdt] WARN: Hardlink/Symlink failed. Falling back to physical copy for {}.",
         target.display()
     );
-    retry_io(|| tokio::fs::copy(source, target)).await?;
-    Ok(())
-}
-
-/// Retry a fallible I/O operation while it keeps failing with a transient file-lock error
-/// (Windows sharing violation, error 32). Non-lock errors and success return immediately.
-async fn retry_io<T, F, Fut>(mut op: F) -> std::io::Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = std::io::Result<T>>,
-{
-    let mut attempts = 0;
-    loop {
-        return match op().await {
-            Ok(value) => Ok(value),
-            Err(e) => {
-                if attempts < MAX_LOCK_RETRIES && is_file_lock_error(&e) {
-                    attempts += 1;
-                    tokio::time::sleep(RETRY_BACKOFF).await;
-                    continue;
-                }
-                Err(e)
-            }
-        }
+    match tokio::fs::copy(source, target).await {
+        Ok(_) => MountAttempt::Mounted,
+        Err(e) if is_lock_error(&e) => MountAttempt::Locked,
+        Err(e) => MountAttempt::Failed(MdtError::VirtualDirMountFailed(format!(
+            "cannot copy {} to {}: {e}",
+            source.display(),
+            target.display()
+        ))),
     }
 }
 
-/// Whether an I/O error is a transient Windows file-lock (sharing violation, raw OS error 32).
-/// On non-Windows platforms this is always `false`.
-fn is_file_lock_error(e: &std::io::Error) -> bool {
-    cfg!(windows) && e.raw_os_error() == Some(32)
+/// Whether an I/O error is a transient file lock we should wait out.
+///
+/// On Windows a file held open by another process (most often Windows Defender mid-scan) surfaces
+/// as `ERROR_SHARING_VIOLATION` (32) or `ERROR_ACCESS_DENIED` (5). `ERROR_PRIVILEGE_NOT_HELD`
+/// (1314, the "no symlink permission" case) is deliberately *not* a lock — it must fall through to
+/// the copy strategy instead. On non-Windows there is no equivalent sharing violation, so this is
+/// always `false`.
+fn is_lock_error(e: &std::io::Error) -> bool {
+    cfg!(windows) && matches!(e.raw_os_error(), Some(32) | Some(5))
+}
+
+/// Format the first [`MAX_NAMES_SHOWN`] blocked target names, comma-separated, for a log line.
+fn blocked_names(locked: &[VirtualDir]) -> String {
+    let mut names = locked
+        .iter()
+        .take(MAX_NAMES_SHOWN)
+        .map(|m| m.target().display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if locked.len() > MAX_NAMES_SHOWN {
+        names.push_str(", ...");
+    }
+    names
 }
 
 /// Create a file symlink using the platform-appropriate API.
@@ -215,12 +306,64 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[tokio::test]
+    async fn mount_all_mounts_a_batch() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mounts: Vec<VirtualDir> = (0..5)
+            .map(|i| {
+                let src = dir.join(format!("src-{i}.bin"));
+                let dst = dir.join(format!("dst-{i}.bin"));
+                std::fs::write(&src, format!("{i}")).unwrap();
+                VirtualDir::new(&src, &dst)
+            })
+            .collect();
+
+        mount_all(mounts, 2).await.unwrap();
+
+        for i in 0..5 {
+            assert_eq!(std::fs::read(dir.join(format!("dst-{i}.bin"))).unwrap(), format!("{i}").into_bytes());
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
-    fn is_file_lock_error_detects_windows_sharing_violation() {
-        let e = std::io::Error::from_raw_os_error(32);
+    fn is_lock_error_detects_windows_lock_codes() {
+        let sharing = std::io::Error::from_raw_os_error(32);
+        let access_denied = std::io::Error::from_raw_os_error(5);
+        let privilege_not_held = std::io::Error::from_raw_os_error(1314);
+
         #[cfg(windows)]
-        assert!(is_file_lock_error(&e));
+        {
+            assert!(is_lock_error(&sharing));
+            assert!(is_lock_error(&access_denied));
+            assert!(!is_lock_error(&privilege_not_held));
+        }
         #[cfg(not(windows))]
-        assert!(!is_file_lock_error(&e));
+        {
+            assert!(!is_lock_error(&sharing));
+            assert!(!is_lock_error(&access_denied));
+            assert!(!is_lock_error(&privilege_not_held));
+        }
+    }
+
+    #[test]
+    fn blocked_names_truncates_to_three() {
+        let mk = |n: &str| VirtualDir::new("src", std::path::Path::new("dst").join(n));
+        let one = vec![mk("a.jar")];
+        assert_eq!(
+            blocked_names(&one),
+            std::path::Path::new("dst").join("a.jar").display().to_string()
+        );
+
+        let many = vec![mk("a.jar"), mk("b.jar"), mk("c.jar"), mk("d.jar")];
+        let mut expected = ["a.jar", "b.jar", "c.jar"]
+            .iter()
+            .map(|n| std::path::Path::new("dst").join(n).display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        expected.push_str(", ...");
+        assert_eq!(blocked_names(&many), expected);
     }
 }

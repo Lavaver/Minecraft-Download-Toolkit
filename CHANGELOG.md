@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.5] | Security Update
+
+> [!NOTE]
+> **v0.6.3 & v0.6.4 has not been “yanked” because, under certain conditions, it may not trigger OS error 32 (file lock exception)**. If you encounter this issue, updating to v0.6.5 will resolve it without requiring any changes to your existing code. Linux and macOS users can choose to remain on v0.6.3/4 or update to v0.6.5; the security patch II in v0.6.5 applies only to the Windows platform.
+
+- **Cargo-style blocking wait** — when a mount hits a transient Windows file lock (sharing
+  violation, raw OS error 32, or access denied), `mount_all` no longer gives up after three quick
+  50 ms retries. Failed mounts are deferred to a polling queue that logs a Cargo-style
+  `Blocking waiting for file lock on: ... (N files, retrying in 2s...)` line and retries every
+  2 seconds for up to 30 seconds total. A locked file is never deleted or truncated to work around
+  the lock — it's skipped and retried. Non-lock errors still abort immediately, and if the lock is
+  still held after 30 seconds, `mount_all` returns `MdtError::VirtualDirMountFailed` with the
+  blocked files listed.
+
 ## [0.6.3 & 0.6.4] | Virtual directory mounting
 
 > [!NOTE]
