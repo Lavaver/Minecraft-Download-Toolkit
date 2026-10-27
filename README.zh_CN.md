@@ -2,11 +2,16 @@
 
 用 Rust 下载并安装 Minecraft 版本与模组加载器。
 
-[![Crates.io](https://img.shields.io/crates/v/mdt-minecraft.svg)](https://crates.io/crates/mdt-minecraft)
+[![Crates.io](https://img.shields.io/crates/v/mdt-minecraft.svg?style=flat-square)](https://crates.io/crates/mdt-minecraft)
 [![docs.rs](https://docs.rs/mdt-minecraft/badge.svg)](https://docs.rs/mdt-minecraft)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![许可证: MIT](https://img.shields.io/badge/开源许可-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 
 **语言 / Language:** [English](README.md) · [简体中文](README.zh_CN.md)
+
+> [!NOTE]
+> **此消息仅在简体中文版自述文件才能看到**。<br>
+> 为便于位于中国大陆的爱好者在无法访问 GitHub 时能够继续访问并克隆仓库，我们已在 [AtomGit (原 GitCode)](https://gitcode.com/Lavaver/Minecraft-Download-Toolkit) 同步了该仓库的副本。<br>
+> 为了避免跨平台协作问题，并提高后续更新效率，**同步仓库仅作为访问并克隆使用，不接受任何 Issues/PR。在同步仓库的项目讨论也将会被无视，因此建议不要在此讨论代码问题。**
 
 MDT 是一个帮你填满 `.minecraft` 目录的小库——原版版本、模组加载器、依赖库、资源文件。它是启动器底下的那层「管道」：没有界面、没有进度条、没有交互提示。你调一个函数，拿到一个 `Result`。
 
