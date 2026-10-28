@@ -30,7 +30,7 @@ MDT 是一个帮你填满 `.minecraft` 目录的小库——原版版本、模�
 
 ```toml
 [dependencies]
-mdt-minecraft = "0.6.3"
+mdt-minecraft = "0.6.6"
 ```
 
 ## 快速上手
@@ -159,9 +159,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 核心库默认没有终端依赖：
 
 ```toml
-mdt-minecraft = "0.6.3"                                              # 仅库
-mdt-minecraft = { version = "0.6.3", features = ["tui"] }            # + TUI
-mdt-minecraft = { version = "0.6.3", features = ["cli"] }            # + CLI 和 TUI
+mdt-minecraft = "0.6.6"                                              # 仅库
+mdt-minecraft = { version = "0.6.6", features = ["tui"] }            # + TUI
+mdt-minecraft = { version = "0.6.6", features = ["cli"] }            # + CLI 和 TUI
 ```
 
 ## 文档

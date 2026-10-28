@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.6.6] | Dual-loader support & in-place naming
+
+- **In-place installs now launch** — with `copy_vanilla = false` the loader JSON takes over the
+  vanilla JSON's filename (`1.16.5.json`), so the launcher sees a real mod-loader version instead
+  of ignoring it. The pristine vanilla JSON is backed up as `1.16.5.json.mcvanila` for the
+  uninstall flow. `read_vanilla_version_id` resolves the base version via `inheritsFrom`, and
+  LiteLoader's launch-arg reader prefers the `.mcvanila` backup, so install and uninstall keep
+  working after the rename.
+
+- **Dual loader (Fabric + Quilt)** — `MdtClient::setup_dual_loader` installs both loaders into one
+  version directory and keeps three JSONs (`<mc_version>.json.mcvanila`,
+  `<mc_version>+Fabric<ver>.json`, `<mc_version>+Quilt<ver>.json`) plus the active
+  `<mc_version>.json`. `switch_dual_loader_context` (or `mdt::dual_loader::switch_loader_context`)
+  flips between them without touching the backup. State is detected by parsing each JSON's
+  `mainClass` and `libraries` — never `id` or filenames — so a renamed folder can't fool it.
+
+- **Latest stable loader version** — `latest_stable_loader_version` returns the newest *stable*
+  Fabric/Quilt version (`LoaderVersionEntry.stable` is now parsed); `setup_dual_loader` uses it when
+  no explicit version is given.
+
+- **Windows file-lock retry on context switch** — the JSON swap retries up to 3 times (100 ms apart)
+  on a Windows sharing violation (error 32), so Defender or a running launcher can't abort a
+  context switch.
+
 ## [0.6.5] | Security Update
 
 > [!NOTE]

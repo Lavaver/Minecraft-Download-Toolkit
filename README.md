@@ -28,7 +28,7 @@ We've handled a lot of the behind-the-scenes work for you, hiding many of the im
 
 ```toml
 [dependencies]
-mdt-minecraft = "0.6.3"
+mdt-minecraft = "0.6.6"
 ```
 
 ## Quick start
@@ -163,9 +163,9 @@ Under the hood `full_install!(client, "1.20.1", loader, "ver")` expands to
 The core library has no terminal dependencies by default:
 
 ```toml
-mdt-minecraft = "0.6.3"                                              # library only
-mdt-minecraft = { version = "0.6.3", features = ["tui"] }            # + TUI
-mdt-minecraft = { version = "0.6.3", features = ["cli"] }            # + CLI and TUI
+mdt-minecraft = "0.6.6"                                              # library only
+mdt-minecraft = { version = "0.6.6", features = ["tui"] }            # + TUI
+mdt-minecraft = { version = "0.6.6", features = ["cli"] }            # + CLI and TUI
 ```
 
 ## Docs

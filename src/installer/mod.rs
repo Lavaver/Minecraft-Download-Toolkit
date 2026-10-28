@@ -572,7 +572,12 @@ pub(crate) fn version_json_path(dir: &Path) -> Result<PathBuf, MdtError> {
     Ok(dir.join(format!("{name}.json")))
 }
 
-/// Read the `id` field from a version directory's JSON — the authoritative Minecraft version.
+/// Read the base Minecraft version from a version directory's JSON.
+///
+/// A loader's JSON (installed in place) carries `inheritsFrom` pointing at the base version, so
+/// that is read first; a plain vanilla JSON has no `inheritsFrom` and falls back to its own `id`.
+/// This lets both install and uninstall resolve the base version after an in-place install renamed
+/// the JSON.
 ///
 /// Fails fast with [`MdtError::InvalidManifest`] if the JSON is missing or malformed.
 pub(crate) async fn read_vanilla_version_id(dir: &Path) -> Result<String, MdtError> {
@@ -584,10 +589,16 @@ pub(crate) async fn read_vanilla_version_id(dir: &Path) -> Result<String, MdtErr
         MdtError::InvalidManifest(format!("version JSON at {} is malformed: {e}", path.display()))
     })?;
     value
-        .get("id")
+        .get("inheritsFrom")
         .and_then(|v| v.as_str())
+        .or_else(|| value.get("id").and_then(|v| v.as_str()))
         .map(str::to_string)
-        .ok_or_else(|| MdtError::InvalidManifest(format!("version JSON at {} has no `id` field", path.display())))
+        .ok_or_else(|| {
+            MdtError::InvalidManifest(format!(
+                "version JSON at {} has no `id` (or `inheritsFrom`) field",
+                path.display()
+            ))
+        })
 }
 
 #[cfg(test)]
@@ -671,6 +682,23 @@ mod tests {
 
         let id = read_vanilla_version_id(&dir).await.unwrap();
         assert_eq!(id, "1.20.1");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn read_vanilla_version_id_prefers_inherits_from() {
+        let dir = temp_dir("vvid-inherits");
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = dir.file_name().unwrap().to_str().unwrap().to_string();
+        std::fs::write(
+            dir.join(format!("{name}.json")),
+            r#"{"id": "1.16.5+Fabric0.20.0", "inheritsFrom": "1.16.5"}"#,
+        )
+        .unwrap();
+
+        let id = read_vanilla_version_id(&dir).await.unwrap();
+        assert_eq!(id, "1.16.5");
 
         std::fs::remove_dir_all(&dir).ok();
     }

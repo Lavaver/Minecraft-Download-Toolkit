@@ -12,7 +12,10 @@ use crate::registry;
 use crate::urls::ManifestUrls;
 use crate::virtual_dir::VirtualDir;
 
-use super::version_json::{download_library, read_vanilla_launch_args, GeneratedLibrary, GeneratedVersionJson};
+use super::version_json::{
+    download_library, read_vanilla_launch_args, swap_loader_json_in_place, GeneratedLibrary,
+    GeneratedVersionJson,
+};
 use super::{
     dedup_urls, download_to_file_from_candidates, libraries_dir, library_path_from_name,
     loader_version_id, target_version_dir, InstallMethod, InstallRequest, InstalledVersion,
@@ -96,10 +99,19 @@ pub async fn install(
     let json_path = vdir.join(format!("{id}.json"));
     tokio::fs::write(&json_path, json.to_pretty_json()?).await?;
 
+    // In-place installs take over the vanilla JSON's filename so the launcher sees the loader
+    // version; the vanilla JSON is backed up as `.mcvanila` for the uninstall flow.
+    let version_json = if let Some(target) = &req.target_dir {
+        swap_loader_json_in_place(target, &req.mc_version, &id).await?;
+        target.join(format!("{}.json", req.mc_version))
+    } else {
+        json_path
+    };
+
     Ok(InstalledVersion {
         id,
         method: InstallMethod::ManualUnpack,
-        version_json: json_path,
+        version_json,
         jar: None,
     })
 }

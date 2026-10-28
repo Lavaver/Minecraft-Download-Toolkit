@@ -6,10 +6,11 @@ use std::sync::Arc;
 use crate::asset::AssetRegistry;
 use crate::customize::{Downloader, HttpDownloader, ProgressReporter, StderrReporter};
 use crate::downloader::{self, VersionJson};
+use crate::dual_loader::{self, DualLoaderInfo, DualLoaderState};
 use crate::error::MdtError;
 use crate::http;
 use crate::installer::{self, InstallRequest, InstalledVersion};
-use crate::manifest::{self, VersionEntry};
+use crate::manifest::{self, latest_stable_loader_version, VersionEntry};
 use crate::mirror::Mirror;
 use crate::modloader::ModLoader;
 use crate::urls::ManifestUrls;
@@ -280,6 +281,187 @@ impl MdtClient {
             self.reporter.as_ref(),
         )
         .await
+    }
+
+    /// Set up or switch a Fabric + Quilt dual-loader instance.
+    ///
+    /// Operates on `version_dir` (`versions/<mc_version>`) in place, keeping the pristine vanilla
+    /// JSON as `<mc_version>.json.mcvanila`. Three scenarios:
+    ///
+    /// * **Vanilla** — installs Fabric then Quilt, and leaves Quilt active.
+    /// * **Single loader** — installs the missing loader (latest stable when no version is given)
+    ///   and makes it active.
+    /// * **Dual loader** — no install; copies the inactive loader's JSON over `<mc_version>.json`
+    ///   to switch context.
+    ///
+    /// When `fabric_version` / `quilt_version` are `None`, the latest stable version is fetched
+    /// from the loader's manifest.
+    ///
+    /// # Errors
+    ///
+    /// * [`MdtError::InvalidManifest`] if `version_dir` has no valid name.
+    /// * [`MdtError::LoaderInstallFailed`] if a version can't be resolved or installed.
+    pub async fn setup_dual_loader(
+        &self,
+        version_dir: &Path,
+        fabric_version: Option<&str>,
+        quilt_version: Option<&str>,
+    ) -> Result<DualLoaderInfo, MdtError> {
+        let mc_version = version_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| {
+                MdtError::InvalidManifest(format!(
+                    "version directory has no valid name: {}",
+                    version_dir.display()
+                ))
+            })?
+            .to_string();
+
+        let state = dual_loader::detect_dual_loader_state(version_dir);
+        let active = match state {
+            DualLoaderState::Vanilla => {
+                let fabric = self
+                    .resolve_loader_version(ModLoader::Fabric, fabric_version)
+                    .await?;
+                let quilt = self
+                    .resolve_loader_version(ModLoader::Quilt, quilt_version)
+                    .await?;
+                self.install_dual_loader(version_dir, ModLoader::Fabric, &fabric).await?;
+                self.install_dual_loader(version_dir, ModLoader::Quilt, &quilt).await?;
+                ModLoader::Quilt
+            }
+            DualLoaderState::Single { present } => {
+                let other = dual_loader::opposite(present);
+                // Preserve the present loader's canonical JSON if a legacy in-place install
+                // hasn't produced one yet.
+                self.ensure_canonical_json(version_dir, &mc_version, present).await?;
+                let other_provided = match other {
+                    ModLoader::Fabric => fabric_version,
+                    ModLoader::Quilt => quilt_version,
+                    _ => None,
+                };
+                let other_version = self.resolve_loader_version(other, other_provided).await?;
+                self.install_dual_loader(version_dir, other, &other_version).await?;
+                other
+            }
+            DualLoaderState::Dual => {
+                // Switch context to the inactive loader.
+                let current = dual_loader::active_loader(version_dir, &mc_version)
+                    .unwrap_or(ModLoader::Fabric);
+                let target = dual_loader::opposite(current);
+                dual_loader::switch_loader_context(version_dir, target).await?;
+                target
+            }
+        };
+
+        let fabric_version = dual_loader::installed_loader_version(version_dir, &mc_version, ModLoader::Fabric);
+        let quilt_version = dual_loader::installed_loader_version(version_dir, &mc_version, ModLoader::Quilt);
+
+        Ok(DualLoaderInfo {
+            mc_version,
+            fabric_version,
+            quilt_version,
+            active,
+        })
+    }
+
+    /// Resolve a loader version: use `provided`, or fetch the latest stable from the manifest.
+    async fn resolve_loader_version(
+        &self,
+        loader: ModLoader,
+        provided: Option<&str>,
+    ) -> Result<String, MdtError> {
+        if let Some(v) = provided {
+            return Ok(v.to_string());
+        }
+        let entries = match loader {
+            ModLoader::Fabric => {
+                manifest::fetch_fabric_manifest(self.downloader.as_ref(), &self.mirror).await?.loader
+            }
+            ModLoader::Quilt => {
+                manifest::fetch_quilt_manifest(self.downloader.as_ref(), &self.mirror).await?.loader
+            }
+            other => {
+                return Err(MdtError::LoaderInstallFailed(format!(
+                    "dual loader does not support {}",
+                    other.display_name()
+                )))
+            }
+        };
+        latest_stable_loader_version(&entries).ok_or_else(|| {
+            MdtError::LoaderInstallFailed(format!("no stable {} version found", loader.display_name()))
+        })
+    }
+
+    /// Install `loader` in place, then keep its `<mc_version>+<Loader><ver>.json` config around
+    /// (the in-place install leaves it only as `<mc_version>.json`).
+    async fn install_dual_loader(
+        &self,
+        version_dir: &Path,
+        loader: ModLoader,
+        version: &str,
+    ) -> Result<(), MdtError> {
+        let installed = self.install_modloader(version_dir, loader, version, false).await?;
+        let canonical = version_dir.join(format!("{}.json", installed.id));
+        tokio::fs::copy(&installed.version_json, &canonical).await?;
+        Ok(())
+    }
+
+    /// Ensure the present loader has a canonical `<mc_version>+<Loader><ver>.json` file, copying
+    /// the active JSON when it doesn't (a legacy in-place install keeps the config only under
+    /// `<mc_version>.json`). The loader version is read from the JSON's `libraries`, not its `id`.
+    async fn ensure_canonical_json(
+        &self,
+        version_dir: &Path,
+        mc_version: &str,
+        loader: ModLoader,
+    ) -> Result<(), MdtError> {
+        if dual_loader::find_loader_json(version_dir, mc_version, loader).is_some() {
+            return Ok(());
+        }
+        let active = version_dir.join(format!("{mc_version}.json"));
+        let Some(version) = dual_loader::loader_version_from_json(&active, loader) else {
+            return Ok(());
+        };
+        let canonical = version_dir.join(format!(
+            "{mc_version}+{}{}.json",
+            loader.display_name(),
+            version
+        ));
+        tokio::fs::copy(&active, &canonical).await?;
+        Ok(())
+    }
+
+    /// Detect the dual-loader state of `version_dir` (Vanilla / Single / Dual).
+    pub fn detect_dual_loader_state(&self, version_dir: &Path) -> DualLoaderState {
+        dual_loader::detect_dual_loader_state(version_dir)
+    }
+
+    /// Switch the active loader context of `version_dir` to `target_loader` (Fabric or Quilt).
+    ///
+    /// Copies the target loader's canonical JSON over `<mc_version>.json`. The `.mcvanila` backup
+    /// and both loader JSONs are left untouched. The copy retries on a transient Windows sharing
+    /// violation (error 32), since the active JSON is commonly held by Defender or a launcher.
+    ///
+    /// # Panics
+    ///
+    /// This method never panics — every failure is returned as `Err`. Do **not** `.unwrap()` the
+    /// result unless you have already verified the target loader is installed (for example via
+    /// [`Self::detect_dual_loader_state`]).
+    ///
+    /// # Errors
+    ///
+    /// * [`MdtError::InvalidManifest`] if `version_dir` has no valid name, or if `target_loader`
+    ///   is not installed. **Before calling this method, make sure the target loader is
+    ///   installed** — install it with [`Self::setup_dual_loader`] and check the state with
+    ///   [`Self::detect_dual_loader_state`].
+    pub async fn switch_dual_loader_context(
+        &self,
+        version_dir: &Path,
+        target_loader: ModLoader,
+    ) -> Result<(), MdtError> {
+        dual_loader::switch_loader_context(version_dir, target_loader).await
     }
 }
 

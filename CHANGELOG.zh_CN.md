@@ -1,5 +1,15 @@
 # 更新日志
 
+## [0.6.6] | 双加载器支持与就地命名
+
+- **就地安装现在能正常启动了**。`copy_vanilla = false` 时，加载器 JSON 会顶替原版 JSON 的文件名（`1.16.5.json`），启动器就能识别出这是个模组加载器版本，而不是视而不见。纯净的原版 JSON 备份为 `1.16.5.json.mcvanila` 供卸载流程使用。`read_vanilla_version_id` 通过 `inheritsFrom` 解析基础版本，LiteLoader 的启动参数读取也优先用 `.mcvanila` 备份，所以改名后安装与卸载依然正常。
+
+- **双加载器（Fabric + Quilt）**：`MdtClient::setup_dual_loader` 把两个加载器装进同一个版本目录，并保留三份 JSON（`<mc_version>.json.mcvanila`、`<mc_version>+Fabric<ver>.json`、`<mc_version>+Quilt<ver>.json`）外加活跃的 `<mc_version>.json`。`switch_dual_loader_context`（或 `mdt::dual_loader::switch_loader_context`）在两者之间切换，不碰备份。状态检测靠解析每个 JSON 的 `mainClass` 与 `libraries`——绝不看 `id` 或文件名，改文件夹名也骗不过它。
+
+- **最新稳定版加载器**：`latest_stable_loader_version` 从清单里挑最新的*稳定* Fabric/Quilt 版本（现在会解析 `LoaderVersionEntry.stable`）；没传显式版本时 `setup_dual_loader` 就用它。
+
+- **切换上下文时的 Windows 文件锁重试**。JSON 交换在遇到 Windows 共享冲突（错误 32）时最多重试 3 次（间隔 100ms），Defender 或正在运行的启动器不会再打断切换。
+
 ## [0.6.5] | 安全更新
 
 > [!NOTE]

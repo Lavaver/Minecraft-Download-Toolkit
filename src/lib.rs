@@ -82,6 +82,7 @@ mod macros;
 
 pub mod asset;
 pub mod downloader;
+pub mod dual_loader;
 pub mod installer;
 pub mod manifest;
 pub mod mc_version;
@@ -101,12 +102,14 @@ pub use asset::AssetRegistry;
 pub use client::{MdtClient, MdtClientBuilder};
 pub use customize::{Downloader, FsRegistryCache, HttpDownloader, ProgressReporter, RegistryCache, StderrReporter};
 pub use downloader::{AssetIndex, AssetObject, DownloadTask, VersionJson};
+pub use dual_loader::{DualLoaderInfo, DualLoaderState};
 pub use error::MdtError;
 pub use installer::{InstallMethod, InstallRequest, InstalledVersion};
 pub use manifest::{
     FabricVersionsList, ForgeVersionsList, LatestMinecraftVersion, LiteLoaderVersionEntry,
     LoaderVersionEntry, ManifestData, MavenMetadata, MinecraftVersionsList, QuiltVersionsList,
-    VersionEntry, VersionType, fetch_all_manifests, loader_versions_from_data, neoforge_mc_prefix,
+    VersionEntry, VersionType, fetch_all_manifests, latest_stable_loader_version,
+    loader_versions_from_data, neoforge_mc_prefix,
 };
 pub use mc_version::McVersion;
 pub use mirror::Mirror;

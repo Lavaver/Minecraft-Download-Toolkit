@@ -56,10 +56,14 @@ pub enum VersionType {
 /// Forge version manifest: `mc_version -> [full version strings]`.
 pub type ForgeVersionsList = HashMap<String, Vec<String>>;
 
-/// A single loader version entry (Fabric / Quilt). Only `version` is consumed.
+/// A single loader version entry (Fabric / Quilt).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LoaderVersionEntry {
     pub version: String,
+    /// Whether this is a stable release (Fabric / Quilt mark betas and snapshots with
+    /// `stable: false`).
+    #[serde(default)]
+    pub stable: bool,
 }
 
 /// Fabric meta v2 manifest (only `loader` is consumed).
@@ -371,6 +375,18 @@ pub fn loader_versions_from_data(
     }
 }
 
+/// The latest stable loader version from a Fabric/Quilt manifest, falling back to the newest
+/// entry when none are marked stable. The list is expected to be ordered newest-first (the meta
+/// endpoints return it that way).
+#[must_use]
+pub fn latest_stable_loader_version(entries: &[LoaderVersionEntry]) -> Option<String> {
+    entries
+        .iter()
+        .find(|e| e.stable)
+        .or_else(|| entries.first())
+        .map(|e| e.version.clone())
+}
+
 /// Derive the NeoForge Maven version prefix from a Minecraft version (heuristic).
 ///
 /// NeoForge's numbering:
@@ -437,6 +453,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(text, "ok");
+    }
+
+    #[test]
+    fn latest_stable_loader_version_prefers_stable_and_falls_back() {
+        let entries = vec![
+            LoaderVersionEntry { version: "0.16.0".into(), stable: false },
+            LoaderVersionEntry { version: "0.15.11".into(), stable: true },
+            LoaderVersionEntry { version: "0.15.10".into(), stable: true },
+        ];
+        assert_eq!(latest_stable_loader_version(&entries), Some("0.15.11".to_string()));
+
+        let all_unstable = vec![
+            LoaderVersionEntry { version: "0.16.0".into(), stable: false },
+            LoaderVersionEntry { version: "0.15.11".into(), stable: false },
+        ];
+        assert_eq!(latest_stable_loader_version(&all_unstable), Some("0.16.0".to_string()));
+
+        assert_eq!(latest_stable_loader_version(&[]), None);
     }
 
     #[tokio::test]

@@ -192,6 +192,28 @@ async fn fetch_profile_json(
     }))
 }
 
+/// Swap a freshly-written Method B loader JSON into the vanilla JSON's filename for an in-place
+/// install, so launchers recognize it (the JSON name must match the vanilla JAR name).
+///
+/// The original vanilla JSON is backed up as `<mc_version>.json.mcvanila` for the uninstall flow.
+/// The backup is created only once: a pre-existing `.mcvanila` (from an earlier in-place install)
+/// is left intact, so re-installing a loader never clobbers the real vanilla JSON.
+pub(super) async fn swap_loader_json_in_place(
+    target_dir: &Path,
+    mc_version: &str,
+    loader_id: &str,
+) -> Result<(), MdtError> {
+    let vanilla_json = target_dir.join(format!("{mc_version}.json"));
+    let loader_json = target_dir.join(format!("{loader_id}.json"));
+    let backup_json = target_dir.join(format!("{mc_version}.json.mcvanila"));
+
+    if vanilla_json.exists() && !backup_json.exists() {
+        tokio::fs::rename(&vanilla_json, &backup_json).await?;
+    }
+    tokio::fs::rename(&loader_json, &vanilla_json).await?;
+    Ok(())
+}
+
 /// Method B entry point for profile-based loaders (Fabric / Quilt).
 ///
 /// `profile_urls` is ordered mirror-first, official-last; the first URL that returns a parseable
@@ -240,10 +262,19 @@ pub async fn install_from_profile(
     let json_path = vdir.join(format!("{id}.json"));
     tokio::fs::write(&json_path, serde_json::to_string_pretty(&profile)?).await?;
 
+    // In-place installs take over the vanilla JSON's filename so the launcher sees the loader
+    // version; the vanilla JSON is backed up as `.mcvanila` for the uninstall flow.
+    let version_json = if let Some(target) = &req.target_dir {
+        swap_loader_json_in_place(target, &req.mc_version, &id).await?;
+        target.join(format!("{}.json", req.mc_version))
+    } else {
+        json_path
+    };
+
     Ok(InstalledVersion {
         id,
         method: InstallMethod::ManualUnpack,
-        version_json: json_path,
+        version_json,
         jar: None,
     })
 }
@@ -300,22 +331,40 @@ pub async fn install_legacy_forge(
     let json_path = vdir.join(format!("{id}.json"));
     tokio::fs::write(&json_path, serde_json::to_string_pretty(&mirrored)?).await?;
 
+    let version_json = if let Some(t) = target_dir {
+        swap_loader_json_in_place(t, mc_version, &id).await?;
+        t.join(format!("{mc_version}.json"))
+    } else {
+        json_path
+    };
+
     let _ = tokio::fs::remove_dir_all(&temp).await;
 
     Ok(InstalledVersion {
         id,
         method: InstallMethod::ManualUnpack,
-        version_json: json_path,
+        version_json,
         jar: None,
     })
 }
 
 /// Read `minecraftArguments` and `mainClass` from an installed vanilla version JSON.
+///
+/// After an in-place install the pristine vanilla JSON lives at `.json.mcvanila` (the `.json` slot
+/// is the loader JSON); read that backup when present so re-installing never appends the tweak
+/// class twice.
 pub async fn read_vanilla_launch_args(
     root: &Path,
     mc_version: &str,
 ) -> Result<(Option<String>, Option<String>), MdtError> {
-    let path = version_dir(root, mc_version).join(format!("{mc_version}.json"));
+    let dir = version_dir(root, mc_version);
+    let vanilla_path = dir.join(format!("{mc_version}.json"));
+    let backup_path = dir.join(format!("{mc_version}.json.mcvanila"));
+    let path = if backup_path.exists() {
+        backup_path
+    } else {
+        vanilla_path
+    };
     let text = tokio::fs::read_to_string(&path).await.map_err(|e| {
         MdtError::IoError(e).context(format!("vanilla version JSON not found at {}", path.display()))
     })?;
@@ -540,5 +589,93 @@ mod tests {
 
         assert!(used.ends_with("/fallback.json"), "used {used}");
         assert_eq!(text, profile);
+    }
+
+    #[tokio::test]
+    async fn swap_loader_json_in_place_moves_loader_and_backs_up_vanilla() {
+        let dir = unique_dir("swap");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("1.16.5.json"), r#"{"id":"1.16.5"}"#).unwrap();
+        std::fs::write(
+            dir.join("1.16.5+Fabric0.20.0.json"),
+            r#"{"id":"1.16.5+Fabric0.20.0","inheritsFrom":"1.16.5"}"#,
+        )
+        .unwrap();
+
+        swap_loader_json_in_place(&dir, "1.16.5", "1.16.5+Fabric0.20.0")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("1.16.5.json")).unwrap(),
+            r#"{"id":"1.16.5+Fabric0.20.0","inheritsFrom":"1.16.5"}"#
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("1.16.5.json.mcvanila")).unwrap(),
+            r#"{"id":"1.16.5"}"#
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn swap_loader_json_in_place_preserves_existing_vanilla_backup() {
+        let dir = unique_dir("swap-keep-backup");
+        std::fs::create_dir_all(&dir).unwrap();
+        // The vanilla JSON was already backed up by an earlier in-place install; the "vanilla"
+        // slot currently holds the previous loader JSON.
+        std::fs::write(
+            dir.join("1.16.5.json"),
+            r#"{"id":"1.16.5+Fabric0.20.0","inheritsFrom":"1.16.5"}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("1.16.5.json.mcvanila"), r#"{"id":"1.16.5"}"#).unwrap();
+        std::fs::write(
+            dir.join("1.16.5+Quilt0.24.0.json"),
+            r#"{"id":"1.16.5+Quilt0.24.0","inheritsFrom":"1.16.5"}"#,
+        )
+        .unwrap();
+
+        swap_loader_json_in_place(&dir, "1.16.5", "1.16.5+Quilt0.24.0")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("1.16.5.json")).unwrap(),
+            r#"{"id":"1.16.5+Quilt0.24.0","inheritsFrom":"1.16.5"}"#
+        );
+        // The original vanilla backup is untouched.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("1.16.5.json.mcvanila")).unwrap(),
+            r#"{"id":"1.16.5"}"#
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn read_vanilla_launch_args_prefers_mcvanila_backup() {
+        let root = unique_dir("launch-args");
+        let mc_version = "1.12.2";
+        let vdir = root.join("versions").join(mc_version);
+        std::fs::create_dir_all(&vdir).unwrap();
+        // The `.json` slot is a previous loader JSON (tweak class already appended).
+        std::fs::write(
+            vdir.join(format!("{mc_version}.json")),
+            r#"{"minecraftArguments":"--tweakClass com.mumfrey.liteloader.launch.LiteLoaderTweaker","mainClass":"net.minecraft.launchwrapper.Launch"}"#,
+        )
+        .unwrap();
+        // The pristine vanilla JSON is the `.mcvanila` backup.
+        std::fs::write(
+            vdir.join(format!("{mc_version}.json.mcvanila")),
+            r#"{"minecraftArguments":"--username ${auth_player_name}","mainClass":"net.minecraft.client.main.Main"}"#,
+        )
+        .unwrap();
+
+        let (args, main) = read_vanilla_launch_args(&root, mc_version).await.unwrap();
+        assert_eq!(args.as_deref(), Some("--username ${auth_player_name}"));
+        assert_eq!(main.as_deref(), Some("net.minecraft.client.main.Main"));
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }
