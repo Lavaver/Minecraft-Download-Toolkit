@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
 
-use crate::error::MdtError;
+use crate::error::{is_disk_full, MdtError};
 
 /// Default concurrency for batch mounting. Bounded so we never exhaust file descriptors.
 pub const DEFAULT_MOUNT_CONCURRENCY: usize = 32;
@@ -213,6 +213,10 @@ async fn mount_file(source: &Path, target: &Path) -> MountAttempt {
     match tokio::fs::copy(source, target).await {
         Ok(_) => MountAttempt::Mounted,
         Err(e) if is_lock_error(&e) => MountAttempt::Locked,
+        Err(e) if is_disk_full(&e) => MountAttempt::Failed(MdtError::DiskFull(format!(
+            "disk space exhausted mounting {}",
+            target.display()
+        ))),
         Err(e) => MountAttempt::Failed(MdtError::VirtualDirMountFailed(format!(
             "cannot copy {} to {}: {e}",
             source.display(),

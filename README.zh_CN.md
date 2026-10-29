@@ -23,7 +23,7 @@ MDT 是一个帮你填满 `.minecraft` 目录的小库——原版版本、模�
 - 隔离安装——每个加载器都装进各自的 `versions/<mc>+<Loader><ver>` 目录，坏掉的加载器绝不会碰到你的原版游戏。
 - 卸载——通过 SHA-1 清单比对，把加载器还原回纯净原版。
 - SHA-1 校验下载，源站慢或被墙时自动切换镜像。
-- 通过可编辑的 `providers.toml` 自定义镜像（编译期内置）。
+- 通过可编辑的 `providers.compile.toml` 自定义镜像（编译期内置）。
 - 核心库零终端依赖；`cli` 和 `tui` 是可选 feature。
 
 ## 安装
@@ -86,9 +86,9 @@ client.uninstall_modloader(&vanilla, ModLoader::Quilt).await?;
 |--------------------------|----------------------------------------------------------------------|
 | `Mirror::BMCLAPI`        | 社区镜像（默认）。代理 Mojang、Fabric、Forge、NeoForge、LiteLoader。 |
 | `Mirror::Mojang`         | 官方服务器。                                                         |
-| `Mirror::Custom("name")` | 你自己的 provider，在 `providers.toml` 里声明为 `[name]`。           |
+| `Mirror::Custom("name")` | 你自己的 provider，在 `providers.compile.toml` 里声明为 `[name]`。           |
 
-请求失败会自动回退到对向镜像（自定义镜像回退到 `BMCLAPI`）。端点与重写规则写在 [`providers.toml`](providers.toml) 里——见 [docs/mirror_toml.md](docs/mirror_toml.md) 和 [docs/mirror_uri.md](docs/mirror_uri.md)。
+请求失败会自动回退到对向镜像（自定义镜像回退到 `BMCLAPI`）。端点与重写规则写在 [`providers.compile.toml`](providers.compile.toml) 里——见 [docs/mirror_toml.md](docs/mirror_toml.md) 和 [docs/mirror_uri.md](docs/mirror_uri.md)。
 
 ## 加载器
 

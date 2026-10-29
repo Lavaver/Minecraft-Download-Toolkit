@@ -1,8 +1,9 @@
 [package]
 name = "mdt-macros"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 rust-version = "1.85.0"
+homepage = "https://github.com/Lavaver/Minecraft-Download-Toolkit"
 description = "Compile-time provider codegen for MDT"
 license = "MIT"
 

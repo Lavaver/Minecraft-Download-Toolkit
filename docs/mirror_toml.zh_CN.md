@@ -2,7 +2,7 @@
 
 **语言 / Language:** [English](mirror_toml.md) · [简体中文](mirror_toml.zh_CN.md)
 
-Provider 的端点与 URL 重写规则在 [`providers.toml`](../providers.toml) 里声明，这是唯一事实来源。`mdt-macros::providers!` 过程宏在编译期解析它，并展开成 `&'static` 查找表（思路同 `rust-i18n` 的 `i18n!`），所以运行时什么都不读取、不解析。
+Provider 的端点与 URL 重写规则在 [`providers.compile.toml`](../providers.compile.toml) 里声明，这是唯一事实来源。`mdt-macros::providers!` 过程宏在编译期解析它，并展开成 `&'static` 查找表（思路同 `rust-i18n` 的 `i18n!`），所以运行时什么都不读取、不解析。
 
 ## 文件结构
 

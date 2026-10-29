@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "mdt-macros"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1495,7 +1495,7 @@ dependencies = [
 
 [[package]]
 name = "mdt-minecraft"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "clap",
  "crossterm",
@@ -1512,6 +1512,7 @@ dependencies = [
  "sha2 0.11.1",
  "thiserror 2.0.21",
  "tokio",
+ "toml",
  "wiremock",
  "zip",
 ]

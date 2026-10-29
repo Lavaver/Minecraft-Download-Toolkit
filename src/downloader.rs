@@ -5,8 +5,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt};
 use futures::FutureExt;
@@ -16,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use tokio::io::AsyncReadExt;
 
-use crate::error::MdtError;
+use crate::error::{io_error, MdtError};
 use crate::mirror::Mirror;
 use crate::urls::ManifestUrls;
 
@@ -181,22 +182,50 @@ pub async fn execute_downloads(
 
     let concurrency = concurrency.max(1);
     let total = tasks.len();
+    let total_bytes: u64 = tasks.iter().map(|t| t.size).sum();
     let report_every = (total / 10).max(1);
-    reporter.progress(0, total);
+    let start = Instant::now();
 
+    let remaining: Arc<AtomicU64> = Arc::new(AtomicU64::new(total_bytes));
+    let largest: Arc<Mutex<Option<(String, u64)>>> = Arc::new(Mutex::new(None));
+    let downloaded_count: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let throttle = Arc::new(Mutex::new(Throttle {
         done: 0,
         next_report: report_every,
     }));
     let failed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
+    reporter.progress_bytes(0, total, total_bytes);
+
     let results = stream::iter(tasks.into_iter().map(|task| {
         let throttle = Arc::clone(&throttle);
         let failed = Arc::clone(&failed);
+        let remaining = Arc::clone(&remaining);
+        let largest = Arc::clone(&largest);
+        let downloaded_count = Arc::clone(&downloaded_count);
         let label = task.label.clone();
         let by = task.by.clone();
+        let size = task.size;
+        let file_name = task
+            .dest_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string);
         download_single_file(task, mirror, urls, downloader, failed).map(move |res| {
             let downloaded = matches!(&res, Ok(true));
+            if downloaded {
+                downloaded_count.fetch_add(1, Ordering::Relaxed);
+                let name = label.clone().or_else(|| file_name.clone());
+                if let Some(name) = name {
+                    let mut l = largest.lock().unwrap();
+                    if l.as_ref().map_or(true, |(_, s)| size > *s) {
+                        *l = Some((name, size));
+                    }
+                }
+            }
+            let prev = remaining.fetch_sub(size, Ordering::Relaxed);
+            let rem = prev.saturating_sub(size);
+
             let mut t = throttle.lock().unwrap();
             t.done += 1;
             let done = t.done;
@@ -212,7 +241,7 @@ pub async fn execute_downloads(
                 }
             }
             if report {
-                reporter.progress(done, total);
+                reporter.progress_bytes(done, total, rem);
             }
             res
         })
@@ -221,6 +250,15 @@ pub async fn execute_downloads(
     .collect::<Vec<_>>()
     .await;
 
+    // Batch summary, then flush the pinned progress line.
+    let downloaded_count = downloaded_count.load(Ordering::Relaxed) as usize;
+    let largest = largest.lock().unwrap().take();
+    reporter.summary(
+        downloaded_count,
+        total_bytes,
+        start.elapsed(),
+        largest.as_ref().map(|(n, s)| (n.as_str(), *s)),
+    );
     reporter.finish();
 
     // Fatal errors (local I/O, native extraction) fail the whole batch; file-level network
@@ -468,8 +506,10 @@ async fn download_single_file(
                     std::fs::create_dir_all(p)?;
                 }
 
-                let mut out_file = std::fs::File::create(&out_path)?;
-                std::io::copy(&mut entry, &mut out_file)?;
+                let mut out_file = std::fs::File::create(&out_path)
+                    .map_err(|e| io_error(e, format!("extracting native {}", out_path.display())))?;
+                std::io::copy(&mut entry, &mut out_file)
+                    .map_err(|e| io_error(e, format!("extracting native {}", out_path.display())))?;
             }
             Ok(())
         })
@@ -922,6 +962,15 @@ mod tests {
         fn progress(&self, done: usize, total: usize) {
             self.events.lock().unwrap().push(format!("progress:{done}/{total}"));
         }
+        fn progress_bytes(&self, done: usize, total: usize, remaining: u64) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("progress_bytes:{done}/{total}/{remaining}"));
+        }
+        fn summary(&self, count: usize, bytes: u64, _elapsed: std::time::Duration, _largest: Option<(&str, u64)>) {
+            self.events.lock().unwrap().push(format!("summary:{count}/{bytes}"));
+        }
         fn finish(&self) {
             self.events.lock().unwrap().push("finish".to_string());
         }
@@ -953,7 +1002,8 @@ mod tests {
 
         let events = reporter.events.lock().unwrap();
         assert!(events.iter().any(|e| e == "status:Downloaded a.bin by Minecraft 1.20.1"), "{events:?}");
-        assert!(events.iter().any(|e| e == "progress:1/1"), "{events:?}");
+        assert!(events.iter().any(|e| e == "progress_bytes:1/1/0"), "{events:?}");
+        assert!(events.iter().any(|e| e == "summary:1/5"), "{events:?}");
         assert!(events.iter().any(|e| e == "finish"), "{events:?}");
 
         let _ = std::fs::remove_file(&dest);

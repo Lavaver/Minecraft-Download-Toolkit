@@ -21,7 +21,7 @@ We've handled a lot of the behind-the-scenes work for you, hiding many of the im
   broken loader never touches your vanilla game.
 - Uninstall — revert a loader back to pure vanilla with a SHA-1 manifest comparison.
 - SHA-1 verified downloads with automatic mirror fallback when a source is slow or blocked.
-- Custom mirrors via a `providers.toml` you can edit (compiled in at build time).
+- Custom mirrors via a `providers.compile.toml` you can edit (compiled in at build time).
 - No terminal dependencies in the core; `cli` and `tui` are opt-in features.
 
 ## Install
@@ -86,10 +86,10 @@ You don't have to enforce this yourself — the library does it.
 |--------------------------|----------------------------------------------------------------------------------|
 | `Mirror::BMCLAPI`        | Community mirror (default). Proxies Mojang, Fabric, Forge, NeoForge, LiteLoader. |
 | `Mirror::Mojang`         | Official servers.                                                                |
-| `Mirror::Custom("name")` | Your own provider, declared as `[name]` in `providers.toml`.                     |
+| `Mirror::Custom("name")` | Your own provider, declared as `[name]` in `providers.compile.toml`.                     |
 
 Failed requests fall back to the opposite mirror automatically (custom mirrors fall back to
-`BMCLAPI`). Endpoints and rewrite rules live in [`providers.toml`](providers.toml) — see
+`BMCLAPI`). Endpoints and rewrite rules live in [`providers.compile.toml`](providers.compile.toml) — see
 [docs/mirror_toml.md](docs/mirror_toml.md) and [docs/mirror_uri.md](docs/mirror_uri.md).
 
 ## Loaders

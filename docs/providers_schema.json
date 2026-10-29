@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/Lavaver/MDT/blob/main/docs/providers_schema.json",
-  "title": "MDT providers.toml",
-  "description": "Schema for MDT's mirror-provider configuration (providers.toml). Every top-level `[name]` section declares one provider; `mojang` and `bmclapi` are built-in and required. See docs/mirror_toml.md and docs/mirror_uri.md for the semantics.",
+  "title": "MDT providers.compile.toml",
+  "description": "Schema for MDT's mirror-provider configuration (providers.compile.toml / providers.runtime.toml). Every top-level `[name]` section declares one provider; `mojang` and `bmclapi` are built-in and required. See docs/mirror_toml.md and docs/mirror_uri.md for the semantics.",
   "type": "object",
   "required": ["mojang", "bmclapi"],
   "additionalProperties": {

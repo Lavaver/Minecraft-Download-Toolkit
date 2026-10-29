@@ -23,4 +23,4 @@ paths to the manifest fields.
 | `quilt_meta`      | Quilt meta base; profiles live at `<base>/v3/versions/loader/…`.        |
 
 See the [TOML specification](mirror_toml.md) for how these fields are declared in
-`providers.toml`.
+`providers.compile.toml`.

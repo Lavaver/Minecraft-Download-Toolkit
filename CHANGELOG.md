@@ -1,6 +1,31 @@
 # Changelog
 
-## [0.6.6] | Dual-loader support & in-place naming
+> [!TIP]
+> <font color=green>Green</font> marks the **latest version**, <font color=aqua>aqua</font> marks the **mainstream version recommended by the README**, and <font color=red>red</font> marks **yanked** versions.
+
+## <font color=green>[0.6.7]</font> | Network, disk & mirror infrastructure
+
+> [!NOTE]
+> The `mdt-macros` macro library has been updated to v0.4.2. This update is solely to reflect the renaming of related configuration files; the API has not been modified and will not affect existing projects.
+
+- **Configurable network** — `MdtClientBuilder` now takes `.proxy(...)`, `.connect_timeout(...)`,
+  and `.read_timeout(...)`. The shared client negotiates HTTP/2 (falling back to HTTP/1.1) and keeps
+  an aggressive connection pool, so bursts of asset downloads reuse warm connections.
+
+- **Disk-full defense** — a new `MdtError::DiskFull` is surfaced when a write hits the OS disk-full
+  error (Windows 39/112, Linux 28) instead of a generic I/O error, so launchers can report "out of
+  disk space" precisely.
+
+- **Byte-aware progress & summary** — `ProgressReporter` gains `progress_bytes` and `summary` (with
+  empty defaults, so existing reporters keep compiling). Downloads now report remaining bytes as
+  they go and print a `Downloaded N component(s) (... in ... largest was ...)` summary at the end.
+  `format_bytes` / `format_duration` do the human-friendly formatting.
+
+- **Runtime mirror overrides** — the static config is now `providers.compile.toml`; a
+  `providers.runtime.toml` (or `MDT_RUNTIME_PROVIDERS`) can override `Mirror::Custom` endpoints and
+  rewrite rules at runtime, no recompile needed.
+
+## <font color=aqua>[0.6.6]</font> | Dual-loader support & in-place naming
 
 - **In-place installs now launch** — with `copy_vanilla = false` the loader JSON takes over the
   vanilla JSON's filename (`1.16.5.json`), so the launcher sees a real mod-loader version instead
@@ -100,11 +125,17 @@ timeout (which resets as bytes arrive), so slow downloads survive while a stalle
 times out. Small metadata fetches (manifests, loader profiles) get a strict 15s per-request
 timeout.
 
-## [0.5.1] | hotfix patch 1: We're happy to tell you that we've written a bug :D
+## <font color=red>[0.5.1]</font> | hotfix patch 1: We're happy to tell you that we've written a bug :D
+
+> [!CAUTION]
+> **This version has been yanked.** For existing projects, continuing to use this version can cause unpredictable and serious problems. For new projects, you normally cannot install this version via Cargo.
 
 0.5.0 was yanked: Fix Modloader Installation Deadlock & Add Resilient Network Fallbacks
 
-## [0.5.0] | Modloader (Un)Install Mechanism Update
+## <font color=red>[0.5.0]</font> | Modloader (Un)Install Mechanism Update
+
+> [!CAUTION]
+> **This version has been yanked.** For existing projects, continuing to use this version can cause unpredictable and serious problems. For new projects, you normally cannot install this version via Cargo.
 
 - **Uninstall** — `MdtClient::uninstall_modloader` reverts a loader back to pure vanilla using a
   SHA-1 manifest comparison. It pre-loads the manifest table into memory (no N+1 network queries),

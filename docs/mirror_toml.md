@@ -3,7 +3,7 @@
 **语言 / Language:** [English](mirror_toml.md) · [简体中文](mirror_toml.zh_CN.md)
 
 Provider endpoints and URL-rewrite rules are declared in
-[`providers.toml`](../providers.toml), which is the single source of truth. The
+[`providers.compile.toml`](../providers.compile.toml), which is the single source of truth. The
 `mdt-macros::providers!` proc macro parses it at compile time and expands to `&'static`
 lookup tables (the same idea as `rust-i18n`'s `i18n!`), so nothing is read or parsed at
 runtime.

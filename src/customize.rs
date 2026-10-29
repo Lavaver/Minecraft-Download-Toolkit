@@ -14,7 +14,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::io::AsyncWriteExt;
 
-use crate::error::MdtError;
+use crate::error::{io_error, MdtError};
 
 // ===== progress reporting =====
 
@@ -31,6 +31,48 @@ pub trait ProgressReporter: Send + Sync {
     fn progress(&self, done: usize, total: usize);
     /// The current batch is finished; flush any pinned progress line.
     fn finish(&self);
+    /// A byte-aware progress update: `done` of `total` files, with the bytes still outstanding.
+    ///
+    /// Has an empty default so existing implementations keep compiling unchanged.
+    fn progress_bytes(&self, _done: usize, _total: usize, _remaining_bytes: u64) {}
+    /// A batch summary, emitted once when the whole download finishes.
+    ///
+    /// Has an empty default so existing implementations keep compiling unchanged.
+    fn summary(
+        &self,
+        _downloaded_count: usize,
+        _total_bytes: u64,
+        _elapsed: std::time::Duration,
+        _largest: Option<(&str, u64)>,
+    ) {
+    }
+}
+
+/// Format a byte count as a human-readable size, e.g. `102.5 MiB`.
+pub fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["KiB", "MiB", "GiB", "TiB", "PiB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit - 1])
+}
+
+/// Format a duration compactly, e.g. `1m23s` or `1h2m3s`.
+pub fn format_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{}m{}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+    }
 }
 
 /// The default [`ProgressReporter`]: Cargo-style output on stderr.
@@ -100,6 +142,51 @@ impl ProgressReporter for StderrReporter {
             eprintln!();
         }
     }
+
+    fn progress_bytes(&self, done: usize, total: usize, remaining_bytes: u64) {
+        let mut state = self.inner.lock().unwrap();
+        let line = format!(
+            "Downloading {done}/{total} component(s), remaining bytes: {}",
+            format_bytes(remaining_bytes)
+        );
+        if state.interactive {
+            eprint!("\r{line}");
+        } else {
+            eprintln!("{line}");
+        }
+        state.line = Some(line);
+    }
+
+    fn summary(
+        &self,
+        downloaded_count: usize,
+        total_bytes: u64,
+        elapsed: Duration,
+        largest: Option<(&str, u64)>,
+    ) {
+        let line = match largest {
+            Some((name, size)) => format!(
+                "Downloaded {downloaded_count} component(s) ({}) in {} (largest was `{name}` at {})",
+                format_bytes(total_bytes),
+                format_duration(elapsed),
+                format_bytes(size)
+            ),
+            None => format!(
+                "Downloaded {downloaded_count} component(s) ({}) in {}",
+                format_bytes(total_bytes),
+                format_duration(elapsed)
+            ),
+        };
+        let mut state = self.inner.lock().unwrap();
+        if state.interactive {
+            if let Some(current) = &state.line {
+                let width = current.chars().count();
+                eprint!("\r{}\r", " ".repeat(width));
+            }
+        }
+        eprintln!("{line}");
+        state.line = None;
+    }
 }
 
 // ===== transport =====
@@ -152,12 +239,18 @@ impl Downloader for HttpDownloader {
             if let Some(parent) = dest.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
-            let mut file = tokio::fs::File::create(&dest).await?;
+            let mut file = tokio::fs::File::create(&dest)
+                .await
+                .map_err(|e| io_error(e, "during download"))?;
             let mut stream = resp.bytes_stream();
             while let Some(chunk) = stream.next().await {
-                file.write_all(&chunk?).await?;
+                file.write_all(&chunk?)
+                    .await
+                    .map_err(|e| io_error(e, "during download"))?;
             }
-            file.flush().await?;
+            file.flush()
+                .await
+                .map_err(|e| io_error(e, "during download"))?;
             Ok(())
         })
     }
@@ -240,7 +333,27 @@ mod tests {
         reporter.status("hello");
         reporter.progress(1, 3);
         reporter.progress(3, 3);
+        reporter.progress_bytes(1, 3, 1024);
+        reporter.summary(3, 4096, Duration::from_secs(83), Some(("client.jar", 2048)));
         reporter.finish();
+    }
+
+    #[test]
+    fn format_bytes_formats_sizes() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(1024 * 1024), "1.0 MiB");
+        assert_eq!(format_bytes(107479040), "102.5 MiB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GiB");
+    }
+
+    #[test]
+    fn format_duration_formats_compactly() {
+        assert_eq!(format_duration(Duration::from_secs(0)), "0s");
+        assert_eq!(format_duration(Duration::from_secs(59)), "59s");
+        assert_eq!(format_duration(Duration::from_secs(83)), "1m23s");
+        assert_eq!(format_duration(Duration::from_secs(3723)), "1h2m3s");
     }
 
     #[test]

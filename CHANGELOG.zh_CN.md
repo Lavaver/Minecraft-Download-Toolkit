@@ -1,6 +1,22 @@
 # 更新日志
 
-## [0.6.6] | 双加载器支持与就地命名
+> [!TIP]
+> <font color=green>绿色标记</font>的版本号为**最新版本**，<font color=aqua>水色标记</font>的版本号为**自述文件推荐的主流版本**，<font color=red>红色标记</font>的版本为**已撤回**。
+
+## <font color=green>[0.6.7]</font> | 网络、磁盘与镜像基础设施
+
+> [!NOTE]
+> `mdt-macros` 宏库已更新至 v0.4.2 版本。此次更新仅是为了反映相关配置文件的更名，API 未作修改，也不会影响现有项目。
+
+- **可配置网络**：`MdtClientBuilder` 新增 `.proxy(...)`、`.connect_timeout(...)`、`.read_timeout(...)`。共享客户端会协商 HTTP/2（回退 HTTP/1.1）并维护一个积极的连接池，批量下载资源时能复用热连接。
+
+- **磁盘满防御**：新增 `MdtError::DiskFull`，当写入命中系统磁盘满错误（Windows 39/112、Linux 28）时，不再抛一个笼统的 I/O 错误，而是精确地上报「磁盘空间不足」，启动器可以据此给出明确提示。
+
+- **字节级进度与汇总**：`ProgressReporter` 新增 `progress_bytes` 与 `summary`（默认空实现，旧 reporter 无需改动即可编译）。下载过程现在会实时报告剩余字节，结束后打印 `Downloaded N component(s) (... in ... largest was ...)` 汇总；`format_bytes` / `format_duration` 负责人类可读的格式化。
+
+- **运行时镜像覆盖**：静态配置改名为 `providers.compile.toml`；通过 `providers.runtime.toml`（或环境变量 `MDT_RUNTIME_PROVIDERS`）可以在运行时覆盖 `Mirror::Custom` 的端点与重写规则，无需重新编译。
+
+## <font color=aqua>[0.6.6]</font> | 双加载器支持与就地命名
 
 - **就地安装现在能正常启动了**。`copy_vanilla = false` 时，加载器 JSON 会顶替原版 JSON 的文件名（`1.16.5.json`），启动器就能识别出这是个模组加载器版本，而不是视而不见。纯净的原版 JSON 备份为 `1.16.5.json.mcvanila` 供卸载流程使用。`read_vanilla_version_id` 通过 `inheritsFrom` 解析基础版本，LiteLoader 的启动参数读取也优先用 `.mcvanila` 备份，所以改名后安装与卸载依然正常。
 
@@ -51,11 +67,17 @@
 
 0.5.1 已撤回：全局 30 秒*总*请求超时会在中途掐断大而健康的下载（client.jar、资源）。现在客户端改用 15 秒连接超时 + 30 秒*读*超时（每收到字节就重置），慢下载得以存活，而彻底卡死的镜像仍会超时。小的元数据抓取（清单、加载器 profile）保留 15 秒的单请求超时。
 
-## [0.5.1] | 热修复补丁 1：很高兴告诉你，我们写了个 bug :D
+## <font color=red>[0.5.1]</font> | 热修复补丁 1：很高兴告诉你，我们写了个 bug :D
+
+> [!CAUTION]
+> **该版本遭到撤回**。对于已有项目，继续使用该版本会导致不可预测的严重问题。对于新项目，你通常不能通过 Cargo 安装该版本。
 
 0.5.0 已撤回：修复加载器安装死锁，并加入韧性网络回退。
 
-## [0.5.0] | 加载器（卸载）安装机制更新
+## <font color=red>[0.5.0]</font> | 加载器（卸载）安装机制更新
+
+> [!CAUTION]
+> **该版本遭到撤回**。对于已有项目，继续使用该版本会导致不可预测的严重问题。对于新项目，你通常不能通过 Cargo 安装该版本。
 
 - **卸载**——`MdtClient::uninstall_modloader` 通过 SHA-1 清单比对把加载器还原回纯净原版。它先把清单表预载入内存（无 N+1 网络查询），再用多线程桶排序扫描器扫描磁盘，并应用 MCR 标记（`[Hash].pinned` 已修改、`[Hash].pinned.add` 已新建、`[Filename].pinned.remove` 已删除）。`mods/` 目录会被保留。重复运行是安全的。
 - **1 个公开函数破坏性变更**——`MdtClient::install_modloader` 现在接收原版版本目录（`&Path`）加一个 `copy_vanilla: bool`，取代原来的 `&str` 版本号。Minecraft 版本从该目录 `version.json` 的 `id` 字段读取；JSON 缺失或格式错误时以 `MdtError::InvalidManifest` 快速失败。

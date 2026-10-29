@@ -79,7 +79,7 @@ pub enum MdtError {
     #[error("invalid manifest: {0}")]
     InvalidManifest(String),
 
-    /// A mirror provider name is not declared in `providers.toml`.
+    /// A mirror provider name is not declared in `providers.compile.toml`.
     #[error("unknown mirror provider: {0}")]
     UnknownProvider(String),
 
@@ -94,6 +94,10 @@ pub enum MdtError {
     /// A virtual mount (hardlink / symlink / copy) failed to materialize a file.
     #[error("virtual mount failed: {0}")]
     VirtualDirMountFailed(String),
+
+    /// The disk ran out of space while writing a file.
+    #[error("{0}")]
+    DiskFull(String),
 }
 
 impl MdtError {
@@ -116,6 +120,33 @@ impl MdtError {
             context: context.into(),
             source: Box::new(self),
         }
+    }
+}
+
+/// Whether an I/O error indicates the disk is full.
+///
+/// Windows reports `ERROR_HANDLE_DISK_FULL` (39) or `ERROR_DISK_FULL` (112); POSIX reports
+/// `ENOSPC` (28).
+pub(crate) fn is_disk_full(e: &std::io::Error) -> bool {
+    let Some(code) = e.raw_os_error() else {
+        return false;
+    };
+    if cfg!(windows) {
+        code == 39 || code == 112
+    } else if cfg!(unix) {
+        code == 28
+    } else {
+        false
+    }
+}
+
+/// Convert an I/O error into an [`MdtError`], promoting disk-full errors to [`MdtError::DiskFull`].
+pub(crate) fn io_error(e: std::io::Error, context: impl Into<String>) -> MdtError {
+    let context = context.into();
+    if is_disk_full(&e) {
+        MdtError::DiskFull(format!("disk space exhausted {context}"))
+    } else {
+        MdtError::IoError(e).context(context)
     }
 }
 
@@ -151,5 +182,25 @@ mod tests {
         let s = err.to_string();
         assert!(s.contains("partial download failure"), "{s}");
         assert!(s.contains("https://a") && s.contains("https://b"), "{s}");
+    }
+
+    #[test]
+    fn is_disk_full_detects_platform_codes() {
+        let code39 = std::io::Error::from_raw_os_error(39);
+        let code112 = std::io::Error::from_raw_os_error(112);
+        let code28 = std::io::Error::from_raw_os_error(28);
+
+        #[cfg(windows)]
+        {
+            assert!(is_disk_full(&code39));
+            assert!(is_disk_full(&code112));
+            assert!(!is_disk_full(&code28));
+        }
+        #[cfg(unix)]
+        {
+            assert!(is_disk_full(&code28));
+            assert!(!is_disk_full(&code39));
+            assert!(!is_disk_full(&code112));
+        }
     }
 }

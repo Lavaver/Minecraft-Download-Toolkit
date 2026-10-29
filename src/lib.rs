@@ -43,12 +43,13 @@
 //!
 //! Pick a source with [`Mirror`]: [`Mirror::BMCLAPI`] (the default — a community mirror that
 //! proxies Mojang, Fabric, Forge, NeoForge, and LiteLoader), [`Mirror::Mojang`] (official), or
-//! [`Mirror::Custom`] (your own). Endpoints and rewrite rules live in `providers.toml` and get
-//! compiled into static tables by the `mdt_macros::providers!` macro, so nothing is parsed at
-//! runtime.
+//! [`Mirror::Custom`] (your own). Endpoints and rewrite rules live in `providers.compile.toml` and
+//! get compiled into static tables by the `mdt_macros::providers!` macro, so nothing is parsed at
+//! runtime — unless you also ship a `providers.runtime.toml` (or point `MDT_RUNTIME_PROVIDERS` at
+//! one) to override custom mirrors without recompiling.
 //!
-//! To add a custom mirror, drop a `[name]` section in `providers.toml`, rebuild, and pick it at
-//! runtime:
+//! To add a custom mirror, drop a `[name]` section in `providers.compile.toml`, rebuild, and pick
+//! it at runtime:
 //!
 //! ```no_run
 //! use mdt::{MdtClient, Mirror};
@@ -100,7 +101,10 @@ pub mod tui;
 
 pub use asset::AssetRegistry;
 pub use client::{MdtClient, MdtClientBuilder};
-pub use customize::{Downloader, FsRegistryCache, HttpDownloader, ProgressReporter, RegistryCache, StderrReporter};
+pub use customize::{
+    format_bytes, format_duration, Downloader, FsRegistryCache, HttpDownloader, ProgressReporter,
+    RegistryCache, StderrReporter,
+};
 pub use downloader::{AssetIndex, AssetObject, DownloadTask, VersionJson};
 pub use dual_loader::{DualLoaderInfo, DualLoaderState};
 pub use error::MdtError;

@@ -1,6 +1,6 @@
-//! Proc-macro that turns `providers.toml` into static lookup tables.
+//! Proc-macro that turns `providers.compile.toml` into static lookup tables.
 //!
-//! Like `rust-i18n`'s `i18n!`: [`providers!`] reads `providers.toml` at compile time and expands
+//! Like `rust-i18n`'s `i18n!`: [`providers!`] reads `providers.compile.toml` at compile time and expands
 //! to `&'static` endpoint and rewrite tables, so nothing is parsed at runtime.
 
 use proc_macro::TokenStream;
@@ -34,7 +34,7 @@ const BUILTIN_PROVIDERS: [&str; 2] = ["mojang", "bmclapi"];
 #[proc_macro]
 pub fn providers(_input: TokenStream) -> TokenStream {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo");
-    let toml_path = PathBuf::from(manifest_dir).join("providers.toml");
+    let toml_path = PathBuf::from(manifest_dir).join("providers.compile.toml");
 
     let text = std::fs::read_to_string(&toml_path)
         .unwrap_or_else(|e| panic!("mdt-macros: failed to read {}: {e}", toml_path.display()));
@@ -47,7 +47,7 @@ pub fn providers(_input: TokenStream) -> TokenStream {
     for name in BUILTIN_PROVIDERS {
         assert!(
             providers.contains_key(name),
-            "mdt-macros: providers.toml is missing the built-in `[{name}]` provider"
+            "mdt-macros: providers.compile.toml is missing the built-in `[{name}]` provider"
         );
     }
 
@@ -88,11 +88,11 @@ pub fn providers(_input: TokenStream) -> TokenStream {
     }
 
     let expanded = quote! {
-        // `include_str!` registers providers.toml as a build input so edits trigger a
+        // `include_str!` registers providers.compile.toml as a build input so edits trigger a
         // recompile (the stable equivalent of the still-unstable `proc_macro::tracked_path`).
         #[allow(dead_code)]
         const _PROVIDERS_TOML_SRC: &str =
-            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/providers.toml"));
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/providers.compile.toml"));
 
         pub(crate) struct ProviderUrls {
             #(#field_idents: &'static str,)*

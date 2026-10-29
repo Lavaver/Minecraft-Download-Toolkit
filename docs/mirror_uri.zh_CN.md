@@ -20,4 +20,4 @@
 | `fabric_meta`     | Fabric meta 基础路径；profile 位于 `<base>/v2/versions/loader/…`。      |
 | `quilt_meta`      | Quilt meta 基础路径；profile 位于 `<base>/v3/versions/loader/…`。       |
 
-这些字段如何在 `providers.toml` 里声明，见 [TOML 规范](mirror_toml.zh_CN.md)。
+这些字段如何在 `providers.compile.toml` 里声明，见 [TOML 规范](mirror_toml.zh_CN.md)。

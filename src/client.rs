@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::asset::AssetRegistry;
 use crate::customize::{Downloader, HttpDownloader, ProgressReporter, StderrReporter};
@@ -50,6 +51,9 @@ pub struct MdtClient {
     root: PathBuf,
     concurrency: usize,
     reporter: Arc<dyn ProgressReporter>,
+    proxy: Option<String>,
+    connect_timeout: Duration,
+    read_timeout: Duration,
 }
 
 impl MdtClient {
@@ -82,6 +86,21 @@ impl MdtClient {
     /// The configured download concurrency.
     pub fn concurrency(&self) -> usize {
         self.concurrency
+    }
+
+    /// The configured HTTP proxy URL, if any.
+    pub fn proxy(&self) -> Option<&str> {
+        self.proxy.as_deref()
+    }
+
+    /// The configured connect timeout.
+    pub fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
+    }
+
+    /// The configured read timeout.
+    pub fn read_timeout(&self) -> Duration {
+        self.read_timeout
     }
 
     /// Change the download concurrency at runtime (clamped to at least 1).
@@ -472,6 +491,9 @@ pub struct MdtClientBuilder {
     concurrency: usize,
     reporter: Option<Arc<dyn ProgressReporter>>,
     downloader: Option<Arc<dyn Downloader>>,
+    proxy: Option<String>,
+    connect_timeout: Duration,
+    read_timeout: Duration,
 }
 
 impl MdtClientBuilder {
@@ -484,6 +506,9 @@ impl MdtClientBuilder {
             concurrency: DEFAULT_CONCURRENCY,
             reporter: None,
             downloader: None,
+            proxy: None,
+            connect_timeout: Duration::from_secs(15),
+            read_timeout: Duration::from_secs(30),
         }
     }
 
@@ -528,10 +553,31 @@ impl MdtClientBuilder {
         self
     }
 
+    /// Route all requests through an HTTP proxy, e.g. `http://127.0.0.1:7890`.
+    #[must_use]
+    pub fn proxy(mut self, url: impl Into<String>) -> Self {
+        self.proxy = Some(url.into());
+        self
+    }
+
+    /// Set the TCP connect timeout (default 15s).
+    #[must_use]
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
+    /// Set the per-read timeout (default 30s). It resets after every successful read.
+    #[must_use]
+    pub fn read_timeout(mut self, timeout: Duration) -> Self {
+        self.read_timeout = timeout;
+        self
+    }
+
     /// Finish building: creates the root directory and the shared HTTP client.
     pub fn build(self) -> Result<MdtClient, MdtError> {
         std::fs::create_dir_all(&self.root)?;
-        let http = http::build_client()?;
+        let http = http::build_client(self.proxy.as_deref(), self.connect_timeout, self.read_timeout)?;
         let downloader = self
             .downloader
             .unwrap_or_else(|| Arc::new(HttpDownloader::new(http.clone())));
@@ -542,6 +588,9 @@ impl MdtClientBuilder {
             root: self.root,
             concurrency: self.concurrency,
             reporter: self.reporter.unwrap_or_else(|| Arc::new(StderrReporter::new())),
+            proxy: self.proxy,
+            connect_timeout: self.connect_timeout,
+            read_timeout: self.read_timeout,
         })
     }
 }

@@ -13,7 +13,7 @@ pub enum Mirror {
     /// The BMCLAPI community mirror (proxies Mojang, Fabric, Forge, NeoForge, and LiteLoader).
     #[default]
     BMCLAPI,
-    /// A custom mirror provider, keyed by its `[provider_name]` section in `providers.toml`.
+    /// A custom mirror provider, keyed by its `[provider_name]` section in `providers.compile.toml`.
     ///
     /// The name must match a section compiled in at build time — see the
     /// [TOML spec](/docs/mirror_toml.md).
@@ -32,7 +32,7 @@ impl Mirror {
         }
     }
 
-    /// The provider name from `providers.toml`.
+    /// The provider name from `providers.compile.toml`.
     ///
     /// Used to look up that provider's endpoints and rewrite rules (see
     /// [`crate::urls::ManifestUrls`]). Built-ins return `"mojang"` / `"bmclapi"`;
