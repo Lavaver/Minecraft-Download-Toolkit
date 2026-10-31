@@ -112,48 +112,34 @@ pub struct DownloadTask {
 
 /// Evaluate whether the current platform should download this library.
 fn evaluate_rules(rules: &Option<Vec<Rule>>) -> bool {
-    let Some(rules) = rules else {
-        return true;
-    };
-
-    let mut allowed = false;
+    // Mojang 你不干人事.png
+    let Some(rules) = rules else { return true; };
     let os_name = std::env::consts::OS;
     let os_arch = std::env::consts::ARCH;
 
+    let mut allowed = false;
     for rule in rules {
-        let mut matches = true;
-
-        if let Some(os) = &rule.os {
-            if let Some(name) = &os.name {
-                let name_match = match name.as_str() {
-                    "windows" => os_name == "windows",
-                    "osx" => os_name == "macos",
-                    "linux" => os_name == "linux",
-                    _ => false,
-                };
-                if !name_match {
-                    matches = false;
-                }
-            }
-            if let Some(arch) = &os.arch {
-                let arch_match = match arch.as_str() {
-                    "x86" => os_arch == "x86",
-                    "x86_64" => os_arch == "x86_64",
-                    "arm64" => os_arch == "aarch64",
-                    _ => false,
-                };
-                if !arch_match {
-                    matches = false;
-                }
-            }
-        }
-
-        // Features are not evaluated at download time; an unresolved feature means no match.
         if rule.features.is_some() {
-            matches = false;
+            continue;
         }
 
-        if matches {
+        let os_match = rule.os.as_ref().is_none_or(|os| {
+            let name_ok = os.name.as_ref().is_none_or(|n| match n.as_str() {
+                "windows" => os_name == "windows",
+                "osx" => os_name == "macos",
+                "linux" => os_name == "linux",
+                _ => false,
+            });
+            let arch_ok = os.arch.as_ref().is_none_or(|a| match a.as_str() {
+                "x86" => os_arch == "x86",
+                "x86_64" => os_arch == "x86_64",
+                "arm64" => os_arch == "aarch64",
+                _ => false,
+            });
+            name_ok && arch_ok
+        });
+
+        if os_match {
             allowed = rule.action == "allow";
         }
     }
